@@ -4,7 +4,8 @@
   "private": true,
   "description": "Triagem de segurança de aplicações para homologação",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"

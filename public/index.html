@@ -12,6 +12,26 @@
 </head>
 <body>
     <main>
+        <section class="auth-gate" id="auth-gate" aria-labelledby="auth-title" hidden>
+            <div class="brand-bar">
+                <span class="brand-mark" aria-hidden="true">S</span>
+                <span class="brand-name">SENTINELA<span>APPSEC</span></span>
+                <span class="brand-status"><span aria-hidden="true"></span> ACESSO RESTRITO</span>
+            </div>
+            <p class="eyebrow">AUTENTICAÇÃO ORGANIZACIONAL</p>
+            <h1 id="auth-title">Acesso com<br><em>conta Microsoft.</em></h1>
+            <p class="intro-copy" id="auth-message">Entre com a conta da organização para continuar.</p>
+            <a class="primary-button login-button" id="login-link" href="/auth/microsoft">
+                <span>Entrar com Microsoft</span><span aria-hidden="true">↗</span>
+            </a>
+            <p class="auth-error" id="auth-error" role="alert" hidden></p>
+        </section>
+
+        <div id="application-content" hidden>
+        <div class="user-bar">
+            <span>Conectado como <strong id="signed-in-user"></strong></span>
+            <button class="secondary-button" id="logout-button" type="button">Sair</button>
+        </div>
         <section class="intro">
             <div class="brand-bar">
                 <span class="brand-mark" aria-hidden="true">S</span>
@@ -92,6 +112,7 @@
         </section>
 
         <footer class="page-footer"><span>SENTINELA <span class="footer-divider">/</span> TRIAGEM DE SEGURANÇA</span><span id="footer-capabilities">Aguardando configuração do serviço</span></footer>
+        </div>
     </main>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>

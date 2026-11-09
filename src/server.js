@@ -8,10 +8,19 @@ const AdmZip = require('adm-zip');
 const nodemailer = require('nodemailer');
 const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require('docx');
 const { rateLimit } = require('express-rate-limit');
+const { isAllowedMicrosoftEmail } = require('./microsoft-auth');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('PORT deve ser um inteiro entre 1 e 65535.');
+}
 const host = process.env.HOST || '127.0.0.1';
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 0);
+if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 10) {
+    throw new Error('TRUST_PROXY_HOPS deve ser um inteiro entre 0 e 10.');
+}
+app.set('trust proxy', trustProxyHops);
 const maxUploadBytes = 20 * 1024 * 1024;
 const maxExpandedBytes = 50 * 1024 * 1024;
 const maxFiles = 1200;
@@ -20,6 +29,9 @@ const maxFileBytes = 500 * 1024;
 const maxAiCharacters = 180000;
 const maxDependencyQueries = 2000;
 const storedReports = new Map();
+const reportOwners = new Map();
+const loginAttempts = new Map();
+const authSessions = new Map();
 const publicDirectory = path.resolve(__dirname, '..', 'public');
 const configuredApiOrigins = new Set((process.env.APP_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean));
 const textExtensions = new Set([
@@ -42,6 +54,7 @@ app.use('/api', (request, response, next) => {
     response.setHeader('Access-Control-Allow-Origin', origin);
     response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    response.setHeader('Access-Control-Allow-Credentials', 'true');
     response.setHeader('Access-Control-Max-Age', '600');
     response.vary('Origin');
     if (request.method === 'OPTIONS') return response.sendStatus(204);
@@ -64,9 +77,274 @@ app.get('/api/health', (_request, response) => {
         ok: true,
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
         emailConfigured: Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SECURITY_EMAIL),
+        authConfigured: Boolean(getMicrosoftAuthConfig()),
         maxUploadBytes
     });
 });
+
+app.get('/api/auth/status', (request, response) => {
+    const session = getSession(request);
+    const configurationError = getMicrosoftAuthConfigurationError();
+    response.json({
+        authConfigured: !configurationError,
+        configurationError,
+        authenticated: Boolean(session),
+        user: session ? { name: session.name, email: session.email } : null
+    });
+});
+
+app.get('/auth/microsoft', rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false }), (request, response, next) => {
+    try {
+        const config = requireMicrosoftAuthConfig();
+        const state = crypto.randomBytes(32).toString('base64url');
+        const nonce = crypto.randomBytes(32).toString('base64url');
+        const verifier = crypto.randomBytes(32).toString('base64url');
+        const browserBinding = crypto.randomBytes(32).toString('base64url');
+        const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+        loginAttempts.set(state, { nonce, verifier, browserBinding, expiresAt: Date.now() + 10 * 60 * 1000 });
+        pruneExpiringEntries(loginAttempts);
+
+        const authorizationUrl = new URL(`https://login.microsoftonline.com/${config.tenantId}/oauth2/v2.0/authorize`);
+        authorizationUrl.search = new URLSearchParams({
+            client_id: config.clientId,
+            response_type: 'code',
+            redirect_uri: config.redirectUri,
+            response_mode: 'query',
+            scope: 'openid profile email',
+            state,
+            nonce,
+            code_challenge: challenge,
+            code_challenge_method: 'S256'
+        }).toString();
+        response.setHeader('Set-Cookie', createLoginCookie(browserBinding, request));
+        response.redirect(authorizationUrl.toString());
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get('/auth/callback', async (request, response) => {
+    response.setHeader('Set-Cookie', clearLoginCookie(request));
+    try {
+        const config = requireMicrosoftAuthConfig();
+        const state = typeof request.query.state === 'string' ? request.query.state : '';
+        const attempt = loginAttempts.get(state);
+        loginAttempts.delete(state);
+        if (!attempt || attempt.expiresAt < Date.now()) {
+            throw httpError(400, 'A tentativa de autenticação expirou ou não é válida. Inicie o login novamente.');
+        }
+        const browserBinding = readCookie(request, 'sentinela_oauth');
+        const expectedBinding = Buffer.from(attempt.browserBinding);
+        const receivedBinding = Buffer.from(browserBinding);
+        if (expectedBinding.length !== receivedBinding.length || !crypto.timingSafeEqual(expectedBinding, receivedBinding)) {
+            throw httpError(400, 'A tentativa de autenticação não corresponde a este navegador. Inicie o login novamente.');
+        }
+        if (typeof request.query.error === 'string' || typeof request.query.code !== 'string') {
+            throw httpError(401, 'A Microsoft não concluiu a autenticação. Tente novamente.');
+        }
+
+        const tokenResponse = await fetch(`https://login.microsoftonline.com/${config.tenantId}/oauth2/v2.0/token`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: config.clientId,
+                client_secret: config.clientSecret,
+                grant_type: 'authorization_code',
+                code: request.query.code,
+                redirect_uri: config.redirectUri,
+                code_verifier: attempt.verifier,
+                scope: 'openid profile email'
+            }),
+            signal: AbortSignal.timeout(15000)
+        });
+        if (!tokenResponse.ok) {
+            throw httpError(502, 'Não foi possível concluir o login Microsoft. Verifique a configuração do aplicativo.');
+        }
+        const tokenData = await tokenResponse.json();
+        if (typeof tokenData.id_token !== 'string') {
+            throw httpError(502, 'A resposta da Microsoft não contém uma identidade válida.');
+        }
+        const identity = await validateMicrosoftIdToken(tokenData.id_token, config, attempt.nonce);
+        const email = typeof identity.preferred_username === 'string' ? identity.preferred_username : '';
+        if (!isAllowedMicrosoftEmail(email, config.allowedEmailDomains)) {
+            throw httpError(403, 'Esta conta Microsoft não está autorizada a acessar o Sentinela.');
+        }
+        const sessionId = crypto.randomBytes(32).toString('base64url');
+        authSessions.set(sessionId, {
+            id: sessionId,
+            name: typeof identity.name === 'string' ? identity.name : '',
+            email,
+            expiresAt: Date.now() + 8 * 60 * 60 * 1000
+        });
+        response.append('Set-Cookie', createSessionCookie(sessionId, request));
+        response.redirect('/');
+    } catch (error) {
+        if ((Number(error.status) || 500) >= 500) console.error('[Sentinela/Auth]', error.message);
+        response.redirect('/?authError=login_failed');
+    }
+});
+
+app.post('/api/auth/logout', (request, response) => {
+    const sessionId = readCookie(request, 'sentinela_session');
+    if (sessionId) authSessions.delete(sessionId);
+    response.setHeader('Set-Cookie', clearSessionCookie(request));
+    response.json({ signedOut: true });
+});
+
+app.use('/api', (request, response, next) => {
+    const session = getSession(request);
+    if (session) {
+        request.authSession = session;
+        return next();
+    }
+    response.status(401).json({ error: 'Entre com sua conta Microsoft para continuar.' });
+});
+
+function getMicrosoftAuthConfig() {
+    if (getMicrosoftAuthConfigurationError()) return null;
+    const { MICROSOFT_CLIENT_ID: clientId, MICROSOFT_CLIENT_SECRET: clientSecret, MICROSOFT_TENANT_ID: tenantId, MICROSOFT_REDIRECT_URI: redirectUri } = process.env;
+    const allowedEmailDomains = (process.env.MICROSOFT_ALLOWED_EMAIL_DOMAINS || 'greylogix.com.br')
+        .split(',').map((domain) => domain.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
+    return { clientId, clientSecret, tenantId: tenantId.toLowerCase(), redirectUri, allowedEmailDomains };
+}
+
+function getMicrosoftAuthConfigurationError() {
+    const { MICROSOFT_CLIENT_ID: clientId, MICROSOFT_CLIENT_SECRET: clientSecret, MICROSOFT_TENANT_ID: tenantId, MICROSOFT_REDIRECT_URI: redirectUri } = process.env;
+    const missing = [
+        ['MICROSOFT_CLIENT_ID', clientId],
+        ['MICROSOFT_CLIENT_SECRET', clientSecret],
+        ['MICROSOFT_TENANT_ID', tenantId],
+        ['MICROSOFT_REDIRECT_URI', redirectUri]
+    ].filter(([, value]) => !value?.trim()).map(([key]) => key);
+    if (missing.length) return `Preencha no servidor: ${missing.join(', ')}.`;
+
+    const guidPattern = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i;
+    if (!guidPattern.test(clientId.trim()) || !guidPattern.test(tenantId.trim())) {
+        return 'MICROSOFT_CLIENT_ID e MICROSOFT_TENANT_ID devem ser GUIDs válidos do registro do Entra ID.';
+    }
+
+    let callback;
+    try {
+        callback = new URL(redirectUri);
+    } catch {
+        return 'MICROSOFT_REDIRECT_URI precisa ser uma URL válida terminada em /auth/callback.';
+    }
+    const localHttp = ['localhost', '127.0.0.1', '[::1]'].includes(callback.hostname);
+    if ((callback.protocol !== 'https:' && !(callback.protocol === 'http:' && localHttp))
+        || callback.pathname !== '/auth/callback' || callback.search || callback.hash || callback.username || callback.password) {
+        return 'MICROSOFT_REDIRECT_URI deve ser HTTPS e terminar em /auth/callback; HTTP só é permitido em localhost.';
+    }
+
+    const allowedEmailDomains = (process.env.MICROSOFT_ALLOWED_EMAIL_DOMAINS || 'greylogix.com.br')
+        .split(',').map((domain) => domain.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
+    if (!allowedEmailDomains.length || allowedEmailDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain))) {
+        return 'MICROSOFT_ALLOWED_EMAIL_DOMAINS deve conter domínios válidos separados por vírgula.';
+    }
+    return null;
+}
+
+function requireMicrosoftAuthConfig() {
+    const config = getMicrosoftAuthConfig();
+    if (!config) {
+        throw httpError(503, getMicrosoftAuthConfigurationError() || 'O login Microsoft não está configurado corretamente.');
+    }
+    return config;
+}
+
+async function validateMicrosoftIdToken(idToken, config, expectedNonce) {
+    const parts = idToken.split('.');
+    if (parts.length !== 3) throw httpError(401, 'A Microsoft retornou um token de identidade inválido.');
+
+    let header;
+    let claims;
+    try {
+        header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+        claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    } catch {
+        throw httpError(401, 'A Microsoft retornou um token de identidade inválido.');
+    }
+    if (header.alg !== 'RS256' || typeof header.kid !== 'string') {
+        throw httpError(401, 'O token de identidade usa uma assinatura não permitida.');
+    }
+
+    const jwksResponse = await fetch(`https://login.microsoftonline.com/${config.tenantId}/discovery/v2.0/keys`, {
+        signal: AbortSignal.timeout(10000)
+    });
+    if (!jwksResponse.ok) throw httpError(502, 'Não foi possível validar a assinatura do login Microsoft.');
+    const jwks = await jwksResponse.json();
+    const jwk = jwks.keys?.find((key) => key.kid === header.kid && key.kty === 'RSA' && key.use === 'sig');
+    if (!jwk) throw httpError(401, 'A assinatura do token de identidade não é reconhecida.');
+
+    const signingInput = Buffer.from(`${parts[0]}.${parts[1]}`);
+    const signature = Buffer.from(parts[2], 'base64url');
+    const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+    if (!crypto.verify('RSA-SHA256', signingInput, publicKey, signature)) {
+        throw httpError(401, 'A assinatura do token de identidade é inválida.');
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (claims.aud !== config.clientId || claims.tid !== config.tenantId
+        || claims.iss !== `https://login.microsoftonline.com/${config.tenantId}/v2.0`
+        || claims.nonce !== expectedNonce || !Number.isFinite(claims.exp) || claims.exp <= now
+        || (claims.nbf !== undefined && (!Number.isFinite(claims.nbf) || claims.nbf > now))
+        || typeof claims.sub !== 'string') {
+        throw httpError(401, 'O token de identidade não corresponde a esta aplicação ou organização.');
+    }
+    return claims;
+}
+
+function getSession(request) {
+    const sessionId = readCookie(request, 'sentinela_session');
+    const session = sessionId ? authSessions.get(sessionId) : null;
+    if (!session) return null;
+    if (session.expiresAt <= Date.now()) {
+        authSessions.delete(sessionId);
+        return null;
+    }
+    return session;
+}
+
+function getOwnedReport(request, scanId) {
+    if (!scanId || reportOwners.get(scanId) !== request.authSession.id) return null;
+    return storedReports.get(scanId);
+}
+
+function readCookie(request, name) {
+    const cookieHeader = request.get('Cookie') || '';
+    for (const item of cookieHeader.split(';')) {
+        const separator = item.indexOf('=');
+        if (separator < 0 || item.slice(0, separator).trim() !== name) continue;
+        return item.slice(separator + 1).trim();
+    }
+    return '';
+}
+
+function createSessionCookie(sessionId, request) {
+    const secure = process.env.NODE_ENV === 'production' || request.secure;
+    return `sentinela_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${8 * 60 * 60}${secure ? '; Secure' : ''}`;
+}
+
+function createLoginCookie(binding, request) {
+    const secure = process.env.NODE_ENV === 'production' || request.secure;
+    return `sentinela_oauth=${binding}; Path=/auth/callback; HttpOnly; SameSite=Lax; Max-Age=600${secure ? '; Secure' : ''}`;
+}
+
+function clearLoginCookie(request) {
+    const secure = process.env.NODE_ENV === 'production' || request.secure;
+    return `sentinela_oauth=; Path=/auth/callback; HttpOnly; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`;
+}
+
+function clearSessionCookie(request) {
+    const secure = process.env.NODE_ENV === 'production' || request.secure;
+    return `sentinela_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`;
+}
+
+function pruneExpiringEntries(entries) {
+    const now = Date.now();
+    for (const [key, value] of entries) {
+        if (value.expiresAt <= now) entries.delete(key);
+    }
+}
 
 function ensureAiConfigured() {
     if (!process.env.OPENAI_API_KEY) {
@@ -88,6 +366,7 @@ app.post('/api/scan/zip', requireAiConfiguration, upload.single('file'), async (
         if (!request.file) return response.status(400).json({ error: 'Selecione um arquivo ZIP.' });
         const { files, warnings } = readZip(request.file.buffer);
         const report = await createReport(files, request.file.originalname, warnings);
+        reportOwners.set(report.scanId, request.authSession.id);
         response.json(report);
     } catch (error) {
         next(error);
@@ -100,6 +379,7 @@ app.post('/api/scan/github', requireAiConfiguration, async (request, response, n
         const archive = await fetchGithubArchive(repository);
         const { files, warnings } = readZip(archive);
         const report = await createReport(files, `${repository.owner}/${repository.name}`, warnings);
+        reportOwners.set(report.scanId, request.authSession.id);
         response.json(report);
     } catch (error) {
         next(error);
@@ -109,7 +389,7 @@ app.post('/api/scan/github', requireAiConfiguration, async (request, response, n
 app.post('/api/report-email', async (request, response, next) => {
     try {
         const emailConfig = getEmailConfig();
-        const report = storedReports.get(request.body?.scanId);
+        const report = getOwnedReport(request, request.body?.scanId);
         if (!report) return response.status(404).json({ error: 'Relatório não encontrado. Execute a análise novamente.' });
 
         const transporter = nodemailer.createTransport({
@@ -135,7 +415,7 @@ app.post('/api/report-email', async (request, response, next) => {
 
 app.post('/api/report-prompt', async (request, response, next) => {
     try {
-        const report = storedReports.get(request.body?.scanId);
+        const report = getOwnedReport(request, request.body?.scanId);
         if (!report) return response.status(404).json({ error: 'Relatório não encontrado. Execute a análise novamente.' });
         const prompt = await buildClaudePrompt(report);
         response.json({ prompt });
@@ -146,7 +426,7 @@ app.post('/api/report-prompt', async (request, response, next) => {
 
 app.get('/api/report-docx', async (request, response, next) => {
     try {
-        const report = storedReports.get(request.query.scanId);
+        const report = getOwnedReport(request, request.query.scanId);
         if (!report) return response.status(404).json({ error: 'Relatório não encontrado. Execute a análise novamente.' });
         const document = buildDocxDocument(report);
         const buffer = await Packer.toBuffer(document);
@@ -338,7 +618,11 @@ async function createReport(files, project, ingestionWarnings = []) {
         frameworks: ['LGPD', 'ISO 27001', 'ISO 27002']
     };
     storedReports.set(report.scanId, report);
-    if (storedReports.size > 100) storedReports.delete(storedReports.keys().next().value);
+    if (storedReports.size > 100) {
+        const oldestReportId = storedReports.keys().next().value;
+        storedReports.delete(oldestReportId);
+        reportOwners.delete(oldestReportId);
+    }
     return report;
 }
 

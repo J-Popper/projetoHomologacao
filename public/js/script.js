@@ -9,9 +9,13 @@ const resultsSection = document.querySelector('#results');
 const toast = document.querySelector('#toast');
 const promptPanel = document.querySelector('#prompt-panel');
 const claudePrompt = document.querySelector('#claude-prompt');
+const authGate = document.querySelector('#auth-gate');
+const applicationContent = document.querySelector('#application-content');
+const loginLink = document.querySelector('#login-link');
 const apiBaseUrl = resolveApiBaseUrl();
 let selectedSource = 'zip';
 let currentReport = null;
+let isAuthenticated = false;
 let toastTimer;
 const severityLabels = {
     critical: 'Crítica',
@@ -99,8 +103,56 @@ form.addEventListener('submit', async (event) => {
     }
 });
 
+document.querySelector('#logout-button').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+        await fetchJson('/api/auth/logout', { method: 'POST' });
+        window.location.assign(`${apiBaseUrl}/`);
+    } catch (error) {
+        button.disabled = false;
+        showToast(error.message || 'Não foi possível encerrar a sessão.');
+    }
+});
+
+async function loadAuthStatus() {
+    const message = document.querySelector('#auth-message');
+    const error = document.querySelector('#auth-error');
+    loginLink.href = `${apiBaseUrl}/auth/microsoft`;
+    const authError = new URLSearchParams(window.location.search).get('authError');
+    if (authError) {
+        error.textContent = 'Não foi possível concluir o login Microsoft. Confira a configuração do aplicativo e tente novamente.';
+        error.hidden = false;
+        window.history.replaceState({}, '', window.location.pathname);
+    }
+    try {
+        const status = await fetchJson('/api/auth/status', {}, 8000);
+        isAuthenticated = status.authenticated;
+        authGate.hidden = isAuthenticated;
+        applicationContent.hidden = !isAuthenticated;
+        if (isAuthenticated) {
+            document.querySelector('#signed-in-user').textContent = status.user?.email || status.user?.name || 'Conta Microsoft';
+        } else if (!status.authConfigured) {
+            message.textContent = 'O acesso está bloqueado até que o login Microsoft seja configurado corretamente no servidor.';
+            error.textContent = status.configurationError || 'Confira as variáveis de configuração Microsoft no servidor.';
+            error.hidden = false;
+            loginLink.setAttribute('aria-disabled', 'true');
+            loginLink.classList.add('disabled');
+            loginLink.removeAttribute('href');
+        }
+        scanButton.disabled = !isAuthenticated || !serviceStatus.aiConfigured;
+    } catch {
+        isAuthenticated = false;
+        authGate.hidden = false;
+        applicationContent.hidden = true;
+        message.textContent = 'Não foi possível verificar a autenticação. O acesso permanece bloqueado.';
+        error.textContent = 'Verifique se o backend está ativo e tente recarregar a página.';
+        error.hidden = false;
+    }
+}
+
 function setBusy(busy, label = 'Iniciar análise') {
-    scanButton.disabled = busy || !serviceStatus.aiConfigured;
+    scanButton.disabled = busy || !serviceStatus.aiConfigured || !isAuthenticated;
     scanButton.querySelector('span').textContent = label;
 }
 
@@ -240,7 +292,7 @@ function createFinding(finding) {
 document.querySelector('#docx-button').addEventListener('click', async () => {
     if (!currentReport) return;
     try {
-        const response = await fetch(`${apiBaseUrl}/api/report-docx?scanId=${encodeURIComponent(currentReport.scanId)}`);
+        const response = await fetch(`${apiBaseUrl}/api/report-docx?scanId=${encodeURIComponent(currentReport.scanId)}`, { credentials: 'include' });
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.error || 'Não foi possível gerar o documento Word.');
@@ -325,6 +377,7 @@ async function fetchJson(url, options = {}, timeoutMs = 75000) {
     try {
         response = await fetch(`${apiBaseUrl}${url}`, {
             ...options,
+            credentials: 'include',
             signal: options.signal || AbortSignal.timeout(timeoutMs)
         });
     } catch (error) {
@@ -370,7 +423,7 @@ function resolveApiBaseUrl() {
     return '';
 }
 
-let serviceStatus = { emailConfigured: false };
+let serviceStatus = { emailConfigured: false, aiConfigured: false };
 async function loadServiceStatus() {
     const dot = document.querySelector('#service-dot');
     const label = document.querySelector('#service-label');
@@ -380,7 +433,7 @@ async function loadServiceStatus() {
         aiStatusHint.textContent = serviceStatus.aiConfigured
             ? 'Disponível. O projeto será enviado à API OpenAI configurada; credenciais reconhecidas são mascaradas antes do envio.'
             : 'Indisponível. Configure OPENAI_API_KEY no servidor para liberar a análise.';
-        scanButton.disabled = !serviceStatus.aiConfigured;
+        scanButton.disabled = !serviceStatus.aiConfigured || !isAuthenticated;
         dot?.classList.add('online');
         if (label) label.textContent = serviceStatus.aiConfigured ? 'Serviço ativo · IA obrigatória disponível' : 'Serviço ativo · IA obrigatória indisponível';
         if (footer) footer.textContent = `Análise contextual por IA obrigatória ${serviceStatus.emailConfigured ? '· e-mail configurado' : '· e-mail indisponível'}`;
@@ -394,4 +447,5 @@ async function loadServiceStatus() {
     }
 }
 
+loadAuthStatus();
 loadServiceStatus();
