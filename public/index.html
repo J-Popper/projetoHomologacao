@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#f4f3ed">
+    <meta name="theme-color" content="#0b0b0b">
     <meta name="description" content="Análise inicial de segurança para homologação de aplicações.">
     <meta name="sentinela-api-base" content="">
     <title>Sentinela | Análise de segurança</title>
@@ -40,18 +40,19 @@
             </div>
             <p class="eyebrow">PORTÃO DE HOMOLOGAÇÃO <span>·</span> REVISÃO DE APLICAÇÕES</p>
             <h1>Decisões seguras<br>começam com <em>evidências.</em></h1>
-            <p class="intro-copy">Avalie o código, as dependências e os indícios de hospedagem e banco de dados. Receba uma análise contextual por IA, evidências priorizadas e um relatório pronto para compartilhar.</p>
+            <p class="intro-copy">Avalie o código com Semgrep, Gitleaks, auditoria de dependências e análise contextual por IA, ou teste a aplicação em execução com o OWASP ZAP. Receba evidências priorizadas e um relatório pronto para compartilhar.</p>
         </section>
 
         <section class="workspace" aria-label="Nova análise">
             <div class="section-heading">
                 <div><span class="step-index">01</span><h2>Selecione o projeto</h2></div>
-                <span class="private-note"><span aria-hidden="true">◆</span> Análise estática · código não é executado</span>
+                <span class="private-note"><span aria-hidden="true">◆</span> <span id="mode-note">Análise estática · código não é executado</span></span>
             </div>
 
-            <div class="source-tabs" role="tablist" aria-label="Origem do código">
+            <div class="source-tabs" role="tablist" aria-label="Tipo de análise">
                 <button class="source-tab active" id="tab-zip" role="tab" aria-selected="true" aria-controls="panel-zip" type="button">Enviar projeto</button>
                 <button class="source-tab" id="tab-github" role="tab" aria-selected="false" aria-controls="panel-github" type="button">GitHub público</button>
+                <button class="source-tab" id="tab-pentest" role="tab" aria-selected="false" aria-controls="panel-pentest" type="button">Teste dinâmico</button>
             </div>
 
             <form id="scan-form">
@@ -68,15 +69,38 @@
                     <input class="text-input" id="github-url" name="githubUrl" type="url" placeholder="https://github.com/organizacao/projeto" autocomplete="url">
                     <p class="field-hint">Apenas repositórios públicos. O servidor consulta o código durante a análise.</p>
                 </div>
+                <div class="source-panel" id="panel-pentest" role="tabpanel" aria-labelledby="tab-pentest" hidden>
+                    <label class="field-label" for="pentest-url">URL da aplicação em homologação</label>
+                    <input class="text-input" id="pentest-url" name="pentestUrl" type="url" placeholder="https://app.homologacao.greylogix.com.br" autocomplete="url">
+                    <p class="field-hint" id="pentest-hint">Somente hosts autorizados no servidor (PENTEST_ALLOWED_HOSTS). Nunca aponte para produção.</p>
 
-                <div class="ai-required" role="note">
+                    <fieldset class="mode-options">
+                        <legend class="field-label">Modo do teste</legend>
+                        <label class="mode-option">
+                            <input type="radio" name="pentestMode" value="baseline" checked>
+                            <span><strong>Passivo</strong><small>Navega pela aplicação e analisa as respostas: cabeçalhos, cookies, exposição de informações. Não envia ataques. Cerca de 2 a 5 minutos.</small></span>
+                        </label>
+                        <label class="mode-option">
+                            <input type="radio" name="pentestMode" value="full">
+                            <span><strong>Ativo</strong><small>Envia ataques reais (SQL injection, XSS, path traversal etc.). Pode criar, alterar ou apagar dados e gerar carga. Use apenas em homologação. Até 30 minutos.</small></span>
+                        </label>
+                    </fieldset>
+
+                    <label class="consent-row" for="pentest-authorized">
+                        <input id="pentest-authorized" type="checkbox">
+                        <span class="checkmark" aria-hidden="true"></span>
+                        <span><strong>Confirmo que tenho autorização para testar este alvo</strong><small>O teste fica registrado no log do servidor com seu usuário, o alvo e o horário.</small></span>
+                    </label>
+                </div>
+
+                <div class="ai-required" id="ai-required" role="note">
                     <span class="ai-required-icon" aria-hidden="true">✦</span>
                     <span class="ai-required-copy"><strong>Análise contextual por IA obrigatória</strong><small id="ai-status-hint">Verificando disponibilidade da análise.</small></span>
                     <span class="required-tag">ETAPA OBRIGATÓRIA</span>
                 </div>
 
                 <div class="form-actions">
-                    <p class="privacy-note">Para concluir a análise, o código será enviado à API OpenAI configurada no servidor. Envie apenas projetos autorizados. A triagem não substitui pentest ou revisão especializada.</p>
+                    <p class="privacy-note" id="privacy-note">Para concluir a análise, o código será enviado à API OpenAI configurada no servidor. Envie apenas projetos autorizados. A triagem não substitui pentest ou revisão especializada.</p>
                     <button class="primary-button" id="scan-button" type="submit" disabled><span>Iniciar análise</span><span aria-hidden="true">↗</span></button>
                 </div>
             </form>
@@ -108,7 +132,7 @@
                 <p class="prompt-caveat">O prompt orienta a revisão por um agente externo; ele não altera arquivos automaticamente. Revise e aprove qualquer patch antes de aplicá-lo.</p>
                 <textarea id="claude-prompt" readonly aria-label="Prompt de correção para um agente de programação"></textarea>
             </div>
-            <p class="report-caveat">Hospedagem e banco de dados são inferidos pelos arquivos enviados; esta análise não consulta a infraestrutura em produção, não testa conexões nem confirma configurações efetivamente implantadas. O resumo não substitui revisão humana, avaliação de impacto e controles de privacidade e segurança da organização.</p>
+            <p class="report-caveat" id="report-caveat">Hospedagem e banco de dados são inferidos pelos arquivos enviados; esta análise não consulta a infraestrutura em produção, não testa conexões nem confirma configurações efetivamente implantadas. O resumo não substitui revisão humana, avaliação de impacto e controles de privacidade e segurança da organização.</p>
         </section>
 
         <footer class="page-footer"><span>SENTINELA <span class="footer-divider">/</span> TRIAGEM DE SEGURANÇA</span><span id="footer-capabilities">Aguardando configuração do serviço</span></footer>

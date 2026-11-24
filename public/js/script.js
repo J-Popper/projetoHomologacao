@@ -26,8 +26,11 @@ const severityLabels = {
 };
 
 for (const tab of tabs) {
-    tab.addEventListener('click', () => selectSource(tab.id === 'tab-zip' ? 'zip' : 'github'));
+    tab.addEventListener('click', () => selectSource(tab.id.replace('tab-', '')));
 }
+
+const codePrivacyNote = 'Para concluir a análise, o código será enviado à API OpenAI configurada no servidor e verificado com Semgrep, Gitleaks e a base OSV. Envie apenas projetos autorizados. A triagem não substitui revisão especializada.';
+const pentestPrivacyNote = 'O OWASP ZAP acessa a URL a partir do servidor do Sentinela. Teste apenas ambientes de homologação autorizados; o modo ativo pode alterar dados da aplicação.';
 
 function selectSource(source) {
     selectedSource = source;
@@ -38,6 +41,16 @@ function selectSource(source) {
     }
     document.querySelector('#panel-zip').hidden = source !== 'zip';
     document.querySelector('#panel-github').hidden = source !== 'github';
+    document.querySelector('#panel-pentest').hidden = source !== 'pentest';
+    document.querySelector('#ai-required').hidden = source === 'pentest';
+    document.querySelector('#privacy-note').textContent = source === 'pentest' ? pentestPrivacyNote : codePrivacyNote;
+    document.querySelector('#mode-note').textContent = source === 'pentest' ? 'Teste dinâmico · aplicação em execução' : 'Análise estática · código não é executado';
+    setBusy(false);
+}
+
+function isSourceReady() {
+    if (!isAuthenticated) return false;
+    return selectedSource === 'pentest' ? Boolean(serviceStatus.pentestConfigured) : Boolean(serviceStatus.aiConfigured);
 }
 
 fileInput.addEventListener('change', () => {
@@ -68,10 +81,22 @@ dropzone.addEventListener('drop', (event) => {
 
 form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (!serviceStatus.aiConfigured) return showToast('A análise por IA é obrigatória. Configure OPENAI_API_KEY no servidor e tente novamente.');
     const options = { method: 'POST', headers: {} };
     let endpoint;
-    if (selectedSource === 'zip') {
+    if (selectedSource === 'pentest') {
+        if (!serviceStatus.pentestConfigured) return showToast('O teste dinâmico está desativado. Configure PENTEST_ALLOWED_HOSTS no servidor.');
+        const url = document.querySelector('#pentest-url').value.trim();
+        if (!url) return showToast('Informe a URL da aplicação em homologação.');
+        const authorized = document.querySelector('#pentest-authorized').checked;
+        if (!authorized) return showToast('Confirme que você tem autorização para testar este alvo.');
+        const mode = document.querySelector('input[name="pentestMode"]:checked')?.value || 'baseline';
+        if (mode === 'full' && !window.confirm('O modo ativo envia ataques reais e pode alterar dados da aplicação. Confirma que o alvo é um ambiente de homologação?')) return;
+        options.headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify({ url, mode, authorized });
+        endpoint = '/api/pentest';
+    } else if (!serviceStatus.aiConfigured) {
+        return showToast('A análise por IA é obrigatória. Configure OPENAI_API_KEY no servidor e tente novamente.');
+    } else if (selectedSource === 'zip') {
         const file = fileInput.files[0];
         if (!file) return showToast('Selecione um arquivo ZIP para continuar.');
         if (!file.name.toLowerCase().endsWith('.zip')) return showToast('O arquivo selecionado precisa ter extensão .zip.');
@@ -88,10 +113,11 @@ form.addEventListener('submit', async (event) => {
         endpoint = '/api/scan/github';
     }
 
-    setBusy(true, 'Analisando código...');
+    setBusy(true, 'Enviando...');
     document.querySelector('#email-status').textContent = '';
     try {
-        const body = await fetchJson(endpoint, options);
+        const { jobId } = await fetchJson(endpoint, options);
+        const body = await waitForJob(jobId);
         currentReport = body;
         renderReport(body);
         resultsSection.hidden = false;
@@ -121,7 +147,18 @@ async function loadAuthStatus() {
     loginLink.href = `${apiBaseUrl}/auth/microsoft`;
     const authError = new URLSearchParams(window.location.search).get('authError');
     if (authError) {
-        error.textContent = 'Não foi possível concluir o login Microsoft. Confira a configuração do aplicativo e tente novamente.';
+        const messages = {
+            browser_binding: 'O login começou em um endereço local diferente do callback. Reinicie o login usando http://localhost:3000.',
+            configuration: 'A configuração Microsoft do servidor está inválida. Confira o Tenant ID, Client ID e a URI de retorno.',
+            expired: 'A tentativa de login expirou ou foi iniciada em outra sessão do navegador. Tente novamente.',
+            invalid_client: 'A Microsoft não reconheceu as credenciais do aplicativo. No Entra ID, crie um novo Client Secret e copie o campo Value (não o Secret ID) para MICROSOFT_CLIENT_SECRET no config/.env. Confira também se ele pertence ao aplicativo do MICROSOFT_CLIENT_ID. Reinicie o servidor após atualizar; não compartilhe o segredo.',
+            microsoft_denied: 'A Microsoft não concluiu o login. Confira se a conta pertence ao tenant configurado.',
+            token_exchange: 'A Microsoft recusou a troca do código de login. Confira as credenciais do aplicativo e a URI de retorno cadastrada.',
+            token_response: 'A resposta da Microsoft não continha uma identidade válida. Confira as permissões OpenID do aplicativo.',
+            unauthorized_domain: 'O login foi concluído, mas esta conta não pertence a um domínio autorizado.',
+            login_failed: 'Não foi possível validar a identidade Microsoft. Reinicie o login e, se persistir, confira o log do backend.'
+        };
+        error.textContent = messages[authError] || messages.login_failed;
         error.hidden = false;
         window.history.replaceState({}, '', window.location.pathname);
     }
@@ -140,7 +177,7 @@ async function loadAuthStatus() {
             loginLink.classList.add('disabled');
             loginLink.removeAttribute('href');
         }
-        scanButton.disabled = !isAuthenticated || !serviceStatus.aiConfigured;
+        setBusy(isBusy);
     } catch {
         isAuthenticated = false;
         authGate.hidden = false;
@@ -151,9 +188,34 @@ async function loadAuthStatus() {
     }
 }
 
-function setBusy(busy, label = 'Iniciar análise') {
-    scanButton.disabled = busy || !serviceStatus.aiConfigured || !isAuthenticated;
-    scanButton.querySelector('span').textContent = label;
+let isBusy = false;
+function setBusy(busy, label) {
+    isBusy = busy;
+    scanButton.disabled = busy || !isSourceReady();
+    scanButton.querySelector('span').textContent = label || (selectedSource === 'pentest' ? 'Iniciar teste' : 'Iniciar análise');
+}
+
+// Acompanha uma tarefa em segundo plano até concluir (análises podem levar vários minutos).
+async function waitForJob(jobId) {
+    const deadline = Date.now() + 60 * 60 * 1000;
+    let failures = 0;
+    while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        let job;
+        try {
+            job = await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}`, {}, 15000);
+            failures = 0;
+        } catch (error) {
+            if (/não encontrada/i.test(error.message) || ++failures >= 5) throw error;
+            continue;
+        }
+        if (job.status === 'done') return job.report;
+        if (job.status === 'error') throw new Error(job.error || 'A análise falhou.');
+        const minutes = Math.floor(job.elapsedSeconds / 60);
+        const seconds = String(job.elapsedSeconds % 60).padStart(2, '0');
+        setBusy(true, `${job.stage} ${minutes}:${seconds}`);
+    }
+    throw new Error('A análise excedeu 60 minutos. Confira o log do servidor.');
 }
 
 function renderReport(report) {
@@ -167,7 +229,13 @@ function renderReport(report) {
     document.querySelector('#verdict-description').textContent = report.recommendationDetail;
     document.querySelector('#finding-total').textContent = String(report.findings.length);
     document.querySelector('#scan-meta').textContent = `${report.project} · ${new Date(report.scannedAt).toLocaleString('pt-BR')}`;
-    document.querySelector('#findings-summary').textContent = `${report.filesAnalyzed} arquivos analisados`;
+    const isPentest = report.kind === 'pentest';
+    document.querySelector('#findings-summary').textContent = isPentest
+        ? `Teste ${report.modeLabel.toLowerCase()} · ${report.urlsTested} URL(s) com alertas`
+        : `${report.filesAnalyzed} arquivos analisados`;
+    document.querySelector('#report-caveat').textContent = isPentest
+        ? 'O teste dinâmico automatizado cobre apenas as páginas que o OWASP ZAP conseguiu alcançar, sem autenticação. Áreas protegidas por login, regras de negócio e falhas de autorização exigem pentest manual. O resultado não substitui revisão especializada.'
+        : 'Hospedagem e banco de dados são inferidos pelos arquivos enviados; esta análise não consulta a infraestrutura em produção, não testa conexões nem confirma configurações efetivamente implantadas. O resumo não substitui revisão humana, avaliação de impacto e controles de privacidade e segurança da organização.';
 
     const metricLabels = [
         ['critical', 'Crítica'], ['high', 'Alta'], ['medium', 'Média'], ['low', 'Baixa'], ['info', 'Informativa']
@@ -185,12 +253,18 @@ function renderReport(report) {
     }));
 
     const scanNotes = document.querySelector('#scan-notes');
-    const completedChecks = [
-        `Análise estática: concluída`,
+    const coverage = report.aiCoverage;
+    const completedChecks = isPentest ? [
+        `Teste dinâmico (OWASP ZAP): concluído · modo ${report.modeLabel}`,
+        `Alvo: ${report.target}`
+    ] : [
+        `Regras estáticas: concluídas`,
+        `Semgrep (SAST): ${report.checks.semgrep ? 'concluído' : 'não executado'}`,
+        `Gitleaks (segredos): ${report.checks.gitleaks ? 'concluído' : 'não executado'}`,
         `Auditoria OSV: ${report.checks.dependencyAudit ? 'concluída' : 'não executada'}`,
         `Hospedagem: ${report.checks.hostingReview ? 'verificada nos arquivos enviados' : 'não verificada'}`,
         `Banco de dados: ${report.checks.databaseReview ? 'verificado nos arquivos enviados' : 'não verificado'}`,
-        `Análise por IA: ${report.checks.aiAnalysis ? 'concluída' : 'não executada'}`
+        `Análise por IA: ${report.checks.aiAnalysis ? `concluída${coverage ? ` · ${coverage.reviewedFiles} de ${coverage.totalFiles} arquivos em ${coverage.batches} lote(s)` : ''}` : 'não executada'}`
     ];
     const legalNotes = Array.isArray(report.legalContext) ? report.legalContext : [];
     const architecture = report.architecture;
@@ -264,6 +338,7 @@ function createFinding(finding) {
     location.className = 'finding-location';
     location.textContent = `${finding.file}${finding.line ? `:${finding.line}` : ''}`;
     summary.append(severity, title, location);
+    const evidenceLabelText = finding.source === 'zap' ? 'Requisições afetadas' : 'Trecho identificado';
 
     const detail = document.createElement('p');
     detail.className = 'finding-detail';
@@ -273,14 +348,21 @@ function createFinding(finding) {
         const evidence = document.createElement('div');
         evidence.className = 'finding-evidence';
         const evidenceLabel = document.createElement('span');
-        evidenceLabel.textContent = 'Trecho identificado';
+        evidenceLabel.textContent = evidenceLabelText;
         const evidenceText = document.createElement('code');
         evidenceText.textContent = finding.evidence;
         evidence.append(evidenceLabel, evidenceText);
         article.append(evidence);
     }
     if (finding.source) {
-        const sourceLabels = { static: 'Regra automática', openai: 'Análise contextual por IA', osv: 'Base de vulnerabilidades OSV' };
+        const sourceLabels = {
+            static: 'Regra automática',
+            openai: 'Análise contextual por IA',
+            osv: 'Base de vulnerabilidades OSV',
+            semgrep: 'Semgrep (SAST)',
+            gitleaks: 'Gitleaks (detecção de segredos)',
+            zap: 'OWASP ZAP (teste dinâmico)'
+        };
         const source = document.createElement('p');
         source.className = 'finding-source';
         source.textContent = `Origem do achado: ${sourceLabels[finding.source] || finding.source}`;
@@ -419,11 +501,12 @@ function resolveApiBaseUrl() {
 
     const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
     const { hostname, port, protocol } = window.location;
-    if (localHosts.has(hostname) && port !== '3000') return `${protocol}//${hostname}:3000`;
+    if (hostname === 'localhost' && port === '3000') return '';
+    if (localHosts.has(hostname)) return `${protocol}//localhost:3000`;
     return '';
 }
 
-let serviceStatus = { emailConfigured: false, aiConfigured: false };
+let serviceStatus = { emailConfigured: false, aiConfigured: false, pentestConfigured: false, dockerAvailable: null };
 async function loadServiceStatus() {
     const dot = document.querySelector('#service-dot');
     const label = document.querySelector('#service-label');
@@ -432,13 +515,25 @@ async function loadServiceStatus() {
         serviceStatus = await fetchJson('/api/health', {}, 8000);
         aiStatusHint.textContent = serviceStatus.aiConfigured
             ? 'Disponível. O projeto será enviado à API OpenAI configurada; credenciais reconhecidas são mascaradas antes do envio.'
-            : 'Indisponível. Configure OPENAI_API_KEY no servidor para liberar a análise.';
-        scanButton.disabled = !serviceStatus.aiConfigured || !isAuthenticated;
+            : 'Análise bloqueada: a chave da OpenAI não está configurada. Preencha OPENAI_API_KEY em config/.env e reinicie o servidor.';
+        document.querySelector('#ai-required').classList.toggle('unavailable', !serviceStatus.aiConfigured);
+        if (!serviceStatus.pentestConfigured) {
+            const pentestHint = document.querySelector('#pentest-hint');
+            pentestHint.textContent = 'Teste dinâmico bloqueado: nenhum host autorizado. Preencha PENTEST_ALLOWED_HOSTS em config/.env e reinicie o servidor.';
+            pentestHint.classList.add('hint-error');
+        } else if (serviceStatus.dockerAvailable === false) {
+            const pentestHint = document.querySelector('#pentest-hint');
+            pentestHint.textContent = 'Docker indisponível no servidor: inicie o Docker Desktop para executar o teste dinâmico.';
+            pentestHint.classList.add('hint-error');
+        }
+        setBusy(isBusy);
         dot?.classList.add('online');
         if (label) label.textContent = serviceStatus.aiConfigured ? 'Serviço ativo · IA obrigatória disponível' : 'Serviço ativo · IA obrigatória indisponível';
-        if (footer) footer.textContent = `Análise contextual por IA obrigatória ${serviceStatus.emailConfigured ? '· e-mail configurado' : '· e-mail indisponível'}`;
+        const tools = serviceStatus.dockerAvailable === false ? '· ferramentas Docker indisponíveis' : '· Semgrep, Gitleaks e ZAP via Docker';
+        if (footer) footer.textContent = `IA obrigatória ${tools} ${serviceStatus.emailConfigured ? '· e-mail configurado' : '· e-mail indisponível'}`;
     } catch {
         serviceStatus.aiConfigured = false;
+        serviceStatus.pentestConfigured = false;
         scanButton.disabled = true;
         aiStatusHint.textContent = 'Indisponível: não foi possível verificar a configuração do serviço.';
         dot?.classList.add('offline');

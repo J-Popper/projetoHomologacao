@@ -6,4 +6,8 @@ function isAllowedMicrosoftEmail(email, allowedDomains) {
     return allowedDomains.includes(normalizedEmail.slice(separator + 1));
 }
 
-module.exports = { isAllowedMicrosoftEmail };
+function getTokenExchangeAuthError(providerError) {
+    return providerError === 'invalid_client' ? 'invalid_client' : 'token_exchange';
+}
+
+module.exports = { getTokenExchangeAuthError, isAllowedMicrosoftEmail };

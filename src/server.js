@@ -1,6 +1,6 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
-require('dotenv').config({ path: path.resolve(__dirname, '..', 'config', '.env') });
+loadEnvironmentFile(path.resolve(__dirname, '..', 'config', '.env'));
 const express = require('express');
 const helmet = require('helmet');
 const multer = require('multer');
@@ -8,7 +8,8 @@ const AdmZip = require('adm-zip');
 const nodemailer = require('nodemailer');
 const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require('docx');
 const { rateLimit } = require('express-rate-limit');
-const { isAllowedMicrosoftEmail } = require('./microsoft-auth');
+const { getTokenExchangeAuthError, isAllowedMicrosoftEmail } = require('./microsoft-auth');
+const scanners = require('./scanners');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -23,8 +24,8 @@ if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 
 app.set('trust proxy', trustProxyHops);
 const maxUploadBytes = 20 * 1024 * 1024;
 const maxExpandedBytes = 50 * 1024 * 1024;
-const maxFiles = 1200;
-const maxSourceFiles = 300;
+const maxFiles = 1000000;
+const maxSourceFiles = 500000;
 const maxFileBytes = 500 * 1024;
 const maxAiCharacters = 180000;
 const maxDependencyQueries = 2000;
@@ -32,6 +33,8 @@ const storedReports = new Map();
 const reportOwners = new Map();
 const loginAttempts = new Map();
 const authSessions = new Map();
+const jobs = new Map();
+const maxAiBatches = Math.max(1, Math.min(20, Number(process.env.AI_MAX_BATCHES || 5)));
 const publicDirectory = path.resolve(__dirname, '..', 'public');
 const configuredApiOrigins = new Set((process.env.APP_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean));
 const textExtensions = new Set([
@@ -43,6 +46,19 @@ const textExtensions = new Set([
 const ignoredPath = /(^|\/)(node_modules|vendor|\.git|dist|build|coverage|\.next|\.venv|venv|__pycache__)(\/|$)/i;
 
 app.disable('x-powered-by');
+app.use((request, response, next) => {
+    if (process.env.NODE_ENV === 'production') return next();
+    let requestUrl;
+    try {
+        requestUrl = new URL(`http://${request.get('host')}`);
+    } catch {
+        return next();
+    }
+    if (requestUrl.hostname === '127.0.0.1' && Number(requestUrl.port || 80) === port) {
+        return response.redirect(308, `http://localhost:${port}${request.originalUrl}`);
+    }
+    next();
+});
 app.use(helmet({ contentSecurityPolicy: { directives: { upgradeInsecureRequests: null } } }));
 app.use('/api', (request, response, next) => {
     const origin = request.get('Origin');
@@ -61,7 +77,10 @@ app.use('/api', (request, response, next) => {
     next();
 });
 app.use(express.json({ limit: '1mb' }));
-app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false }));
+// Consultas de progresso de tarefas têm limite próprio para não consumir o limite geral.
+const isJobPolling = (request) => request.method === 'GET' && request.path.startsWith('/jobs/');
+app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, skip: isJobPolling }));
+app.use('/api/jobs', rateLimit({ windowMs: 15 * 60 * 1000, limit: 1200, standardHeaders: 'draft-8', legacyHeaders: false }));
 
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -78,6 +97,8 @@ app.get('/api/health', (_request, response) => {
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
         emailConfigured: Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SECURITY_EMAIL),
         authConfigured: Boolean(getMicrosoftAuthConfig()),
+        dockerAvailable: scanners.getCachedDockerStatus(),
+        pentestConfigured: scanners.getPentestAllowedHosts().length > 0,
         maxUploadBytes
     });
 });
@@ -125,21 +146,30 @@ app.get('/auth/microsoft', rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, stan
 
 app.get('/auth/callback', async (request, response) => {
     response.setHeader('Set-Cookie', clearLoginCookie(request));
+    let authError = 'login_failed';
     try {
+        const configurationError = getMicrosoftAuthConfigurationError();
+        if (configurationError) {
+            authError = 'configuration';
+            throw httpError(503, configurationError);
+        }
         const config = requireMicrosoftAuthConfig();
         const state = typeof request.query.state === 'string' ? request.query.state : '';
         const attempt = loginAttempts.get(state);
         loginAttempts.delete(state);
         if (!attempt || attempt.expiresAt < Date.now()) {
+            authError = 'expired';
             throw httpError(400, 'A tentativa de autenticação expirou ou não é válida. Inicie o login novamente.');
         }
         const browserBinding = readCookie(request, 'sentinela_oauth');
         const expectedBinding = Buffer.from(attempt.browserBinding);
         const receivedBinding = Buffer.from(browserBinding);
         if (expectedBinding.length !== receivedBinding.length || !crypto.timingSafeEqual(expectedBinding, receivedBinding)) {
+            authError = 'browser_binding';
             throw httpError(400, 'A tentativa de autenticação não corresponde a este navegador. Inicie o login novamente.');
         }
         if (typeof request.query.error === 'string' || typeof request.query.code !== 'string') {
+            authError = 'microsoft_denied';
             throw httpError(401, 'A Microsoft não concluiu a autenticação. Tente novamente.');
         }
 
@@ -158,15 +188,36 @@ app.get('/auth/callback', async (request, response) => {
             signal: AbortSignal.timeout(15000)
         });
         if (!tokenResponse.ok) {
+            authError = 'token_exchange';
+            let providerError = 'unknown';
+            let providerCodes = '';
+            try {
+                const tokenError = await tokenResponse.json();
+                if (typeof tokenError.error === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(tokenError.error)) {
+                    providerError = tokenError.error;
+                }
+                if (Array.isArray(tokenError.error_codes)) {
+                    providerCodes = tokenError.error_codes.filter(Number.isInteger).slice(0, 5).map((code) => `AADSTS${code}`).join(', ');
+                }
+            } catch {
+                providerError = 'invalid_error_response';
+            }
+            console.error(`[Sentinela/Auth] Microsoft token exchange failed: HTTP ${tokenResponse.status}, ${providerError}${providerCodes ? ` (${providerCodes})` : ''}.`);
+            if (providerCodes.includes('AADSTS700025')) {
+                console.error('[Sentinela/Auth] O redirect URI está registrado como cliente público. No Entra ID > Autenticação, mova-o para a plataforma "Web" e desative "Permitir fluxos de clientes públicos".');
+            }
+            authError = getTokenExchangeAuthError(providerError);
             throw httpError(502, 'Não foi possível concluir o login Microsoft. Verifique a configuração do aplicativo.');
         }
         const tokenData = await tokenResponse.json();
         if (typeof tokenData.id_token !== 'string') {
+            authError = 'token_response';
             throw httpError(502, 'A resposta da Microsoft não contém uma identidade válida.');
         }
         const identity = await validateMicrosoftIdToken(tokenData.id_token, config, attempt.nonce);
         const email = typeof identity.preferred_username === 'string' ? identity.preferred_username : '';
         if (!isAllowedMicrosoftEmail(email, config.allowedEmailDomains)) {
+            authError = 'unauthorized_domain';
             throw httpError(403, 'Esta conta Microsoft não está autorizada a acessar o Sentinela.');
         }
         const sessionId = crypto.randomBytes(32).toString('base64url');
@@ -179,8 +230,10 @@ app.get('/auth/callback', async (request, response) => {
         response.append('Set-Cookie', createSessionCookie(sessionId, request));
         response.redirect('/');
     } catch (error) {
-        if ((Number(error.status) || 500) >= 500) console.error('[Sentinela/Auth]', error.message);
-        response.redirect('/?authError=login_failed');
+        if ((Number(error.status) || 500) >= 500 && authError !== 'token_exchange') {
+            console.error('[Sentinela/Auth]', authError, error.message);
+        }
+        response.redirect(`/?authError=${authError}`);
     }
 });
 
@@ -365,9 +418,9 @@ app.post('/api/scan/zip', requireAiConfiguration, upload.single('file'), async (
     try {
         if (!request.file) return response.status(400).json({ error: 'Selecione um arquivo ZIP.' });
         const { files, warnings } = readZip(request.file.buffer);
-        const report = await createReport(files, request.file.originalname, warnings);
-        reportOwners.set(report.scanId, request.authSession.id);
-        response.json(report);
+        const projectName = request.file.originalname;
+        const job = startJob(request.authSession, 'code', (setStage) => createReport(files, projectName, warnings, setStage));
+        response.status(202).json({ jobId: job.id });
     } catch (error) {
         next(error);
     }
@@ -376,14 +429,52 @@ app.post('/api/scan/zip', requireAiConfiguration, upload.single('file'), async (
 app.post('/api/scan/github', requireAiConfiguration, async (request, response, next) => {
     try {
         const repository = parseGithubUrl(request.body?.url);
-        const archive = await fetchGithubArchive(repository);
-        const { files, warnings } = readZip(archive);
-        const report = await createReport(files, `${repository.owner}/${repository.name}`, warnings);
-        reportOwners.set(report.scanId, request.authSession.id);
-        response.json(report);
+        const job = startJob(request.authSession, 'code', async (setStage) => {
+            setStage('Baixando repositório do GitHub...');
+            const archive = await fetchGithubArchive(repository);
+            const { files, warnings } = readZip(archive);
+            return createReport(files, `${repository.owner}/${repository.name}`, warnings, setStage);
+        });
+        response.status(202).json({ jobId: job.id });
     } catch (error) {
         next(error);
     }
+});
+
+app.post('/api/pentest', async (request, response, next) => {
+    try {
+        if (request.body?.authorized !== true) {
+            return response.status(400).json({ error: 'Confirme que você tem autorização para testar este alvo.' });
+        }
+        const mode = request.body?.mode === 'full' ? 'full' : 'baseline';
+        const target = scanners.validatePentestTarget(request.body?.url);
+        if (target.error) return response.status(target.status || 400).json({ error: target.error });
+        if ([...jobs.values()].some((job) => job.type === 'pentest' && job.status === 'running')) {
+            return response.status(409).json({ error: 'Já existe um teste dinâmico em andamento. Aguarde a conclusão para iniciar outro.' });
+        }
+        const session = request.authSession;
+        console.log(`[Sentinela/Pentest] ${new Date().toISOString()} ${session.email} iniciou teste ${mode} em ${target.url}`);
+        const job = startJob(session, 'pentest', async (setStage) => {
+            const result = await scanners.runZap(target.url, mode, setStage);
+            return createPentestReport(target.url, mode, result, session.email);
+        });
+        response.status(202).json({ jobId: job.id });
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get('/api/jobs/:jobId', (request, response) => {
+    const job = jobs.get(request.params.jobId);
+    if (!job || job.ownerId !== request.authSession.id) return response.status(404).json({ error: 'Tarefa não encontrada. Inicie a análise novamente.' });
+    response.json({
+        status: job.status,
+        type: job.type,
+        stage: job.stage,
+        elapsedSeconds: Math.round(((job.finishedAt || Date.now()) - job.startedAt) / 1000),
+        ...(job.status === 'done' ? { report: job.report } : {}),
+        ...(job.status === 'error' ? { error: job.error } : {})
+    });
 });
 
 app.post('/api/report-email', async (request, response, next) => {
@@ -453,10 +544,43 @@ app.use((error, _request, response, _next) => {
 
 app.listen(port, host, () => {
     console.log(`Sentinela disponível em http://${host}:${port}`);
+    if (process.env.NODE_ENV !== 'test') {
+        scanners.isDockerAvailable().then((available) => {
+            if (available) console.log('[Sentinela] Docker disponível: Semgrep, Gitleaks e OWASP ZAP habilitados. Rode "npm run tools:pull" para baixar as imagens antecipadamente.');
+            else console.warn('[Sentinela] Docker indisponível: Semgrep, Gitleaks e o teste dinâmico (ZAP) não serão executados.');
+        });
+    }
     if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
         console.warn('[Sentinela] Escuta de rede habilitada. Proteja o serviço com autenticação e TLS; CORS não substitui autenticação.');
     }
 });
+
+// Análises longas (Semgrep, IA em lotes, OWASP ZAP) rodam em segundo plano; o navegador
+// acompanha o progresso por GET /api/jobs/:id em vez de manter uma requisição aberta.
+function startJob(session, type, work) {
+    const runningForUser = [...jobs.values()].filter((job) => job.ownerId === session.id && job.status === 'running').length;
+    if (runningForUser >= 2) throw httpError(429, 'Você já tem duas análises em andamento. Aguarde a conclusão para iniciar outra.');
+    const job = { id: crypto.randomUUID(), ownerId: session.id, type, status: 'running', stage: 'Iniciando...', startedAt: Date.now(), finishedAt: null };
+    jobs.set(job.id, job);
+    for (const [id, item] of jobs) {
+        if (item.finishedAt && Date.now() - item.finishedAt > 2 * 60 * 60 * 1000) jobs.delete(id);
+    }
+    Promise.resolve()
+        .then(() => work((stage) => { job.stage = stage; }))
+        .then((report) => {
+            reportOwners.set(report.scanId, session.id);
+            job.report = report;
+            job.status = 'done';
+        })
+        .catch((error) => {
+            const status = Number(error.status) || 500;
+            if (status >= 500) console.error(`[Sentinela/${type}]`, error.message);
+            job.error = status < 500 || [502, 503, 504].includes(status) ? error.message : 'Falha interna ao processar a análise. Verifique o log do servidor.';
+            job.status = 'error';
+        })
+        .finally(() => { job.finishedAt = Date.now(); });
+    return job;
+}
 
 function readZip(buffer) {
     let zip;
@@ -577,25 +701,33 @@ async function fetchGithubArchive(repository) {
     return Buffer.concat(chunks, size);
 }
 
-async function createReport(files, project, ingestionWarnings = []) {
-    const findings = scanSource(files);
+async function createReport(files, project, ingestionWarnings = [], setStage = () => {}) {
+    setStage('Executando regras estáticas, dependências, Semgrep, Gitleaks e IA...');
+    const regexFindings = scanSource(files);
     const architecture = inspectArchitecture(files);
-    const [dependencyResult, aiFindings] = await Promise.all([
+    const [dependencyResult, aiResult, toolResult] = await Promise.all([
         scanDependencies(files),
-        scanWithOpenAI(files)
+        scanWithOpenAI(files, setStage),
+        scanners.runCodeTools(files, { redact: redactSecrets })
     ]);
+    // Quando o Gitleaks confirma um segredo na mesma linha, a regra regex equivalente é redundante.
+    const gitleaksLines = new Set(toolResult.findings.filter((item) => item.source === 'gitleaks').map((item) => `${item.file}:${item.line}`));
+    const findings = regexFindings.filter((item) => !(item.id === 'secret-assignment' && gitleaksLines.has(`${item.file}:${item.line}`)));
     findings.push(...dependencyResult.findings);
-    findings.push(...aiFindings);
+    findings.push(...toolResult.findings);
+    findings.push(...aiResult.findings);
     findings.sort((a, b) => severityWeight(b.severity) - severityWeight(a.severity) || a.file.localeCompare(b.file));
 
     const counts = Object.fromEntries(['critical', 'high', 'medium', 'low', 'info'].map((level) => [level, findings.filter((item) => item.severity === level).length]));
+    const toolsIncomplete = !toolResult.checks.semgrep || !toolResult.checks.gitleaks;
     const recommendation = counts.critical || counts.high
         ? 'NÃO RECOMENDADO'
-        : counts.medium || !dependencyResult.checked ? 'REVISÃO MANUAL' : 'APTO COM RESSALVAS';
+        : counts.medium || !dependencyResult.checked || toolsIncomplete ? 'REVISÃO MANUAL' : 'APTO COM RESSALVAS';
     const recommendationDetail = counts.critical || counts.high
         ? 'Há achados de alta gravidade. Corrija ou aceite formalmente os riscos antes de homologar.'
         : counts.medium ? 'Achados de média gravidade exigem validação e decisão explícita da equipe de segurança.'
             : !dependencyResult.checked ? 'A auditoria de dependências não foi concluída; valide a composição do software antes de homologar.'
+            : toolsIncomplete ? 'Semgrep ou Gitleaks não foram executados; a análise está incompleta. Verifique o Docker no servidor e repita a análise.'
             : 'Nenhum achado de alta gravidade foi identificado nas verificações executadas. Isto não comprova que a aplicação seja segura.';
     const legalContext = buildLegalContext();
     const simpleSummary = buildSimpleSummary({ project, recommendation, recommendationDetail, counts, findings, filesAnalyzed: files.length });
@@ -605,10 +737,20 @@ async function createReport(files, project, ingestionWarnings = []) {
         project,
         scannedAt: new Date().toISOString(),
         filesAnalyzed: files.length,
-        checks: { staticAnalysis: true, dependencyAudit: dependencyResult.checked, hostingReview: true, databaseReview: true, aiAnalysis: true },
+        kind: 'code',
+        checks: {
+            staticAnalysis: true,
+            dependencyAudit: dependencyResult.checked,
+            hostingReview: true,
+            databaseReview: true,
+            aiAnalysis: true,
+            semgrep: toolResult.checks.semgrep,
+            gitleaks: toolResult.checks.gitleaks
+        },
+        aiCoverage: aiResult.coverage,
         architecture,
         dependencySources: dependencyResult.sources,
-        warnings: [...ingestionWarnings, ...(dependencyResult.warning ? [dependencyResult.warning] : [])],
+        warnings: [...ingestionWarnings, ...(dependencyResult.warning ? [dependencyResult.warning] : []), ...toolResult.warnings, ...aiResult.warnings],
         recommendation,
         recommendationDetail,
         counts,
@@ -617,6 +759,10 @@ async function createReport(files, project, ingestionWarnings = []) {
         legalContext,
         frameworks: ['LGPD', 'ISO 27001', 'ISO 27002']
     };
+    return storeReport(report);
+}
+
+function storeReport(report) {
     storedReports.set(report.scanId, report);
     if (storedReports.size > 100) {
         const oldestReportId = storedReports.keys().next().value;
@@ -624,6 +770,46 @@ async function createReport(files, project, ingestionWarnings = []) {
         reportOwners.delete(oldestReportId);
     }
     return report;
+}
+
+function createPentestReport(target, mode, zapResult, authorizedBy) {
+    const findings = zapResult.findings;
+    const counts = Object.fromEntries(['critical', 'high', 'medium', 'low', 'info'].map((level) => [level, findings.filter((item) => item.severity === level).length]));
+    const modeLabel = mode === 'full' ? 'Ativo (zap-full-scan)' : 'Passivo (zap-baseline)';
+    const recommendation = counts.critical || counts.high ? 'NÃO RECOMENDADO' : counts.medium ? 'REVISÃO MANUAL' : 'APTO COM RESSALVAS';
+    const recommendationDetail = counts.critical || counts.high
+        ? 'O teste dinâmico encontrou alertas de alto risco na aplicação em execução. Corrija e repita o teste antes de homologar.'
+        : counts.medium ? 'Há alertas de risco médio, geralmente cabeçalhos, cookies ou configurações do servidor. Corrija ou registre a aceitação do risco.'
+            : mode === 'full' ? 'O teste ativo não encontrou alertas de risco médio ou alto. Isso não substitui um pentest manual.'
+                : 'O teste passivo não encontrou alertas de risco médio ou alto. Para maior cobertura, execute também o modo ativo em homologação.';
+    const total = findings.length;
+    const report = {
+        scanId: crypto.randomUUID(),
+        kind: 'pentest',
+        project: target,
+        target,
+        mode,
+        modeLabel,
+        authorizedBy,
+        urlsTested: zapResult.urlsTested,
+        scannedAt: new Date().toISOString(),
+        filesAnalyzed: 0,
+        checks: { staticAnalysis: false, dependencyAudit: false, hostingReview: false, databaseReview: false, aiAnalysis: false, dynamicScan: true },
+        architecture: null,
+        dependencySources: [],
+        warnings: [
+            `Teste dinâmico ${modeLabel.toLowerCase()} executado com OWASP ZAP${zapResult.zapVersion ? ` ${zapResult.zapVersion}` : ''} contra ${target}, autorizado por ${authorizedBy}.`,
+            ...(mode === 'baseline' ? ['O modo passivo apenas navega e observa as respostas; não envia ataques. Use o modo ativo para testar injeções e XSS.'] : [])
+        ],
+        recommendation,
+        recommendationDetail,
+        counts,
+        findings,
+        simpleSummary: `${target}: teste dinâmico ${modeLabel.toLowerCase()} com ${total ? `${total} alerta(s): ${counts.high} alto(s), ${counts.medium} médio(s), ${counts.low} baixo(s) e ${counts.info} informativo(s)` : 'nenhum alerta'}. Recomendação automatizada: ${recommendation}. ${recommendationDetail}`,
+        legalContext: buildLegalContext(),
+        frameworks: ['OWASP', 'LGPD', 'ISO 27001', 'ISO 27002']
+    };
+    return storeReport(report);
 }
 
 function scanSource(files) {
@@ -937,24 +1123,76 @@ function getOsvSeverity(vulnerability) {
     return 'medium';
 }
 
-async function scanWithOpenAI(files) {
-    if (!process.env.OPENAI_API_KEY) throw httpError(503, 'A análise por IA foi solicitada, mas a chave OPENAI_API_KEY não está configurada.');
-    let remainingCharacters = maxAiCharacters;
-    const aiFiles = [];
+// Divide o projeto em lotes de até maxAiCharacters para que a IA revise todos os arquivos,
+// até AI_MAX_BATCHES lotes. Arquivos maiores que um lote inteiro são truncados.
+function buildAiBatches(files) {
+    const batches = [];
+    let current = [];
+    let used = 0;
+    let truncatedFiles = 0;
     for (const file of files) {
-        if (remainingCharacters <= 2000) break;
-        const header = `FILE: ${JSON.stringify(file.path)}\n`;
-        const maxFileChunk = Math.max(1200, remainingCharacters - header.length - 2000);
-        if (maxFileChunk <= 0) break;
-        const content = redactSecrets(file.content).slice(0, maxFileChunk);
-        if (!content.trim()) continue;
-        aiFiles.push({ path: file.path, content });
-        remainingCharacters -= header.length + content.length + 4;
-        if (remainingCharacters <= 2000) break;
+        const redacted = redactSecrets(file.content);
+        if (!redacted.trim()) continue;
+        const header = `FILE: ${JSON.stringify(file.path)}\n`.length + 4;
+        const limit = maxAiCharacters - 2000;
+        const content = redacted.slice(0, limit - header);
+        if (content.length < redacted.length) truncatedFiles += 1;
+        if (used + header + content.length > limit && current.length) {
+            batches.push(current);
+            current = [];
+            used = 0;
+        }
+        current.push({ path: file.path, content });
+        used += header + content.length;
     }
-    if (!aiFiles.length) {
-        return [];
+    if (current.length) batches.push(current);
+    return { batches, truncatedFiles };
+}
+
+async function scanWithOpenAI(files, setStage = () => {}) {
+    if (!process.env.OPENAI_API_KEY) throw httpError(503, 'A análise por IA foi solicitada, mas a chave OPENAI_API_KEY não está configurada.');
+    const { batches: allBatches, truncatedFiles } = buildAiBatches(files);
+    const batches = allBatches.slice(0, maxAiBatches);
+    const warnings = [];
+    const reviewedFiles = batches.reduce((total, batch) => total + batch.length, 0);
+    const totalFiles = allBatches.reduce((total, batch) => total + batch.length, 0);
+    if (allBatches.length > batches.length) {
+        warnings.push(`A IA revisou ${reviewedFiles} de ${totalFiles} arquivos (limite de ${maxAiBatches} lotes, AI_MAX_BATCHES). Os demais foram cobertos apenas pelas ferramentas automáticas.`);
     }
+    if (truncatedFiles) warnings.push(`${truncatedFiles} arquivo(s) muito grande(s) foram revisados pela IA apenas parcialmente.`);
+    if (!batches.length) return { findings: [], warnings, coverage: { reviewedFiles: 0, totalFiles: 0, batches: 0 } };
+
+    const findings = [];
+    let completed = 0;
+    let failedBatches = 0;
+    let firstError;
+    const queue = batches.map((batch, index) => ({ batch, index }));
+    const worker = async () => {
+        while (queue.length) {
+            const { batch, index } = queue.shift();
+            try {
+                findings.push(...await reviewBatchWithOpenAI(batch));
+            } catch (error) {
+                failedBatches += 1;
+                firstError ||= error;
+                console.error(`[Sentinela/OpenAI] lote ${index + 1}/${batches.length}:`, error.message);
+            }
+            completed += 1;
+            setStage(`Análise por IA: ${completed} de ${batches.length} lote(s) concluído(s)...`);
+        }
+    };
+    setStage(`Análise por IA: 0 de ${batches.length} lote(s) concluído(s)...`);
+    await Promise.all(Array.from({ length: Math.min(2, batches.length) }, worker));
+    if (failedBatches === batches.length) throw firstError;
+    if (failedBatches) warnings.push(`${failedBatches} de ${batches.length} lote(s) da análise por IA falharam; parte dos arquivos não foi revisada pela IA.`);
+    return {
+        findings: findings.slice(0, 80),
+        warnings,
+        coverage: { reviewedFiles, totalFiles, batches: batches.length }
+    };
+}
+
+async function reviewBatchWithOpenAI(aiFiles) {
     const source = aiFiles.map((file) => `FILE: ${JSON.stringify(file.path)}\n${file.content}`).join('\n\n');
     const schema = {
         type: 'object', additionalProperties: false, required: ['findings'],
@@ -979,7 +1217,7 @@ async function scanWithOpenAI(files) {
                 text: { format: { type: 'json_schema', name: 'security_review', strict: true, schema } },
                 max_output_tokens: 5000
             }),
-            signal: AbortSignal.timeout(60000)
+            signal: AbortSignal.timeout(Number(process.env.OPENAI_TIMEOUT_SECONDS || 180) * 1000)
         });
     } catch {
         throw httpError(502, 'Não foi possível concluir a análise na API OpenAI.');
@@ -1025,6 +1263,9 @@ function getEmailConfig() {
 function formatEmail(report) {
     const summary = ['critical', 'high', 'medium', 'low', 'info'].map((level) => `${level}: ${report.counts[level]}`).join(' | ');
     const findings = report.findings.map((item) => `[${item.severity.toUpperCase()}] ${item.title}\n  Local: ${item.file}${item.line ? `:${item.line}` : ''}\n  Evidência: ${item.evidence}\n  ${item.description}`).join('\n\n');
+    if (report.kind === 'pentest') {
+        return `Relatório de teste dinâmico Sentinela (OWASP ZAP)\nAlvo: ${report.target}\nModo: ${report.modeLabel}\nAutorizado por: ${report.authorizedBy}\nData: ${report.scannedAt}\nRecomendação: ${report.recommendation}\n${report.recommendationDetail}\n\nAchados: ${summary}\nURLs com alertas: ${report.urlsTested}\n\n${findings || 'Nenhum alerta nas verificações executadas.'}\n\nTeste automatizado; não substitui pentest manual nem comprova ausência de vulnerabilidades.`;
+    }
     const architecture = report.architecture
         ? `\n\nHospedagem (indícios): ${report.architecture.hosting.assessment}\nArquivos de hospedagem: ${report.architecture.hosting.configFiles.join(', ') || 'nenhum identificado'}\nObservações da hospedagem: ${report.architecture.hosting.securityObservations.join(' | ') || 'nenhuma indicação explícita encontrada'}\nBanco de dados (indícios): ${report.architecture.database.assessment}\nArquivos de banco: ${report.architecture.database.configFiles.join(', ') || 'nenhum identificado'}\nObservações do banco: ${report.architecture.database.securityObservations.join(' | ') || 'nenhuma indicação explícita encontrada'}`
         : '';
@@ -1103,19 +1344,28 @@ function buildDocxDocument(report) {
     const document = new Document({
         sections: [{
             children: [
-                new Paragraph({ text: 'Relatório de triagem de segurança', heading: HeadingLevel.TITLE }),
-                new Paragraph({ children: [new TextRun({ text: `Projeto: ${report.project}`, bold: true })] }),
+                new Paragraph({ text: report.kind === 'pentest' ? 'Relatório de teste dinâmico de segurança' : 'Relatório de triagem de segurança', heading: HeadingLevel.TITLE }),
+                new Paragraph({ children: [new TextRun({ text: `${report.kind === 'pentest' ? 'Alvo' : 'Projeto'}: ${report.project}`, bold: true })] }),
                 new Paragraph({ text: `Data da análise: ${new Date(report.scannedAt).toLocaleString('pt-BR')}` }),
                 new Paragraph({ text: `Status geral: ${report.recommendation}` }),
                 new Paragraph({ text: 'Resumo executivo', heading: HeadingLevel.HEADING_1 }),
                 new Paragraph({ text: report.simpleSummary }),
                 new Paragraph({ text: 'Escopo e verificações', heading: HeadingLevel.HEADING_1 }),
-                new Paragraph({ text: `Arquivos analisados: ${report.filesAnalyzed}` }),
-                new Paragraph({ text: `Análise estática: ${report.checks.staticAnalysis ? 'concluída' : 'não executada'}` }),
-                new Paragraph({ text: `Auditoria de dependências: ${report.checks.dependencyAudit ? 'concluída' : 'não concluída'}` }),
-                new Paragraph({ text: `Revisão de hospedagem: ${report.checks.hostingReview ? 'concluída com base nos arquivos enviados' : 'não executada'}` }),
-                new Paragraph({ text: `Revisão de banco de dados: ${report.checks.databaseReview ? 'concluída com base nos arquivos enviados' : 'não executada'}` }),
-                new Paragraph({ text: `Análise contextual por IA: ${report.checks.aiAnalysis ? 'concluída' : 'não executada'}` }),
+                ...(report.kind === 'pentest' ? [
+                    new Paragraph({ text: `Ferramenta: OWASP ZAP — modo ${report.modeLabel}` }),
+                    new Paragraph({ text: `Autorizado por: ${report.authorizedBy}` }),
+                    new Paragraph({ text: `URLs com alertas: ${report.urlsTested}` })
+                ] : [
+                    new Paragraph({ text: `Arquivos analisados: ${report.filesAnalyzed}` }),
+                    new Paragraph({ text: `Análise estática (regras próprias): ${report.checks.staticAnalysis ? 'concluída' : 'não executada'}` }),
+                    new Paragraph({ text: `Semgrep (SAST): ${report.checks.semgrep ? 'concluído' : 'não executado'}` }),
+                    new Paragraph({ text: `Gitleaks (segredos): ${report.checks.gitleaks ? 'concluído' : 'não executado'}` }),
+                    new Paragraph({ text: `Auditoria de dependências: ${report.checks.dependencyAudit ? 'concluída' : 'não concluída'}` }),
+                    new Paragraph({ text: `Revisão de hospedagem: ${report.checks.hostingReview ? 'concluída com base nos arquivos enviados' : 'não executada'}` }),
+                    new Paragraph({ text: `Revisão de banco de dados: ${report.checks.databaseReview ? 'concluída com base nos arquivos enviados' : 'não executada'}` }),
+                    new Paragraph({ text: `Análise contextual por IA: ${report.checks.aiAnalysis ? `concluída${report.aiCoverage ? ` (${report.aiCoverage.reviewedFiles} de ${report.aiCoverage.totalFiles} arquivos)` : ''}` : 'não executada'}` })
+                ]),
+                ...(report.warnings || []).map((warning) => new Paragraph({ text: `Observação: ${warning}` })),
                 ...(report.architecture ? [
                     new Paragraph({ text: 'Indícios de hospedagem e banco de dados', heading: HeadingLevel.HEADING_1 }),
                     new Paragraph({ text: `Hospedagem: ${report.architecture.hosting.assessment} Arquivos: ${report.architecture.hosting.configFiles.join(', ') || 'nenhum identificado'}` }),
@@ -1128,7 +1378,7 @@ function buildDocxDocument(report) {
                 new Paragraph({ text: 'Referências de privacidade e segurança', heading: HeadingLevel.HEADING_1 }),
                 ...report.legalContext.map((item) => new Paragraph({ text: item })),
                 new Paragraph({ text: 'Achados prioritários', heading: HeadingLevel.HEADING_1 }),
-                ...report.findings.slice(0, 12).map((item) => new Paragraph({
+                ...report.findings.slice(0, 60).map((item) => new Paragraph({
                     children: [
                         new TextRun({ text: `[${severityLabels[item.severity] || item.severity}] ${item.title}`, bold: true }),
                         new TextRun({ text: `\nLocal: ${item.file}${item.line ? `:${item.line}` : ''}` }),
@@ -1137,7 +1387,7 @@ function buildDocxDocument(report) {
                     ],
                     spacing: { after: 180 }
                 })),
-                ...(report.findings.length > 12 ? [new Paragraph({ text: `O documento apresenta os 12 achados de maior prioridade. O relatório completo contém ${report.findings.length} achados.` })] : []),
+                ...(report.findings.length > 60 ? [new Paragraph({ text: `O documento apresenta os 60 achados de maior prioridade. O relatório completo contém ${report.findings.length} achados.` })] : []),
                 new Paragraph({ text: 'Limitações', heading: HeadingLevel.HEADING_1 }),
                 new Paragraph({ text: 'Esta é uma triagem automatizada baseada no conteúdo enviado e nas verificações executadas. Pode haver falsos positivos e falhas não detectadas. O resultado não substitui revisão especializada, teste de segurança, avaliação jurídica ou auditoria/certificação normativa.' }),
                 new Paragraph({ text: `Próxima ação recomendada: ${report.recommendationDetail}` })
@@ -1173,5 +1423,29 @@ function isAllowedApiOrigin(origin) {
         return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
     } catch {
         return false;
+    }
+}
+// Em desenvolvimento local, config/.env é a fonte da verdade: variáveis antigas herdadas do
+// terminal (ex.: um MICROSOFT_CLIENT_SECRET expirado) não podem sobrepor o arquivo silenciosamente.
+// Linhas vazias no .env nunca apagam um valor já definido no ambiente.
+// Em produção e testes, variáveis do ambiente continuam tendo prioridade.
+function loadEnvironmentFile(envPath) {
+    const dotenv = require('dotenv');
+    const fs = require('node:fs');
+    if (!fs.existsSync(envPath)) return;
+    const parsed = dotenv.parse(fs.readFileSync(envPath));
+    const override = !['production', 'test'].includes(process.env.NODE_ENV ?? parsed.NODE_ENV);
+    const shadowed = [];
+    for (const [key, value] of Object.entries(parsed)) {
+        const current = process.env[key];
+        if (current === undefined) {
+            process.env[key] = value;
+        } else if (override && value !== '' && current !== value) {
+            process.env[key] = value;
+            shadowed.push(key);
+        }
+    }
+    if (shadowed.length) {
+        console.warn(`[Sentinela/Config] Variáveis do terminal ignoradas em favor de config/.env: ${shadowed.join(', ')}.`);
     }
 }
