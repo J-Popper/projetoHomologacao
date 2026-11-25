@@ -25,12 +25,61 @@
                 <span>Entrar com Microsoft</span><span aria-hidden="true">↗</span>
             </a>
             <p class="auth-error" id="auth-error" role="alert" hidden></p>
+            <details class="local-login">
+                <summary>Entrar com a conta administrativa local</summary>
+                <form id="local-login-form" class="stack-form">
+                    <label class="field-label" for="local-username">Usuário</label>
+                    <input class="text-input" id="local-username" name="username" autocomplete="username" required>
+                    <label class="field-label" for="local-password">Senha</label>
+                    <input class="text-input" id="local-password" name="password" type="password" autocomplete="current-password" required>
+                    <button class="secondary-button" type="submit">Entrar</button>
+                    <p class="auth-error" id="local-login-error" role="alert" hidden></p>
+                </form>
+            </details>
+        </section>
+
+        <section class="auth-gate" id="password-gate" aria-labelledby="password-title" hidden>
+            <div class="brand-bar">
+                <span class="brand-mark" aria-hidden="true">S</span>
+                <span class="brand-name">SENTINELA<span>APPSEC</span></span>
+                <span class="brand-status"><span aria-hidden="true"></span> PRIMEIRO ACESSO</span>
+            </div>
+            <p class="eyebrow">CONTA ADMINISTRATIVA LOCAL</p>
+            <h1 id="password-title">Defina uma<br><em>nova senha.</em></h1>
+            <p class="intro-copy">A senha inicial precisa ser trocada antes de usar o Sentinela. Use ao menos 12 caracteres com três tipos entre minúsculas, maiúsculas, números e símbolos.</p>
+            <form id="password-form" class="stack-form">
+                <label class="field-label" for="current-password">Senha atual</label>
+                <input class="text-input" id="current-password" type="password" autocomplete="current-password" required>
+                <label class="field-label" for="new-password">Nova senha</label>
+                <input class="text-input" id="new-password" type="password" autocomplete="new-password" minlength="12" required>
+                <label class="field-label" for="confirm-password">Confirme a nova senha</label>
+                <input class="text-input" id="confirm-password" type="password" autocomplete="new-password" minlength="12" required>
+                <button class="primary-button" type="submit"><span>Salvar nova senha</span><span aria-hidden="true">↗</span></button>
+                <p class="auth-error" id="password-error" role="alert" hidden></p>
+            </form>
+        </section>
+
+        <section class="auth-gate" id="github-gate" aria-labelledby="github-title" hidden>
+            <div class="brand-bar">
+                <span class="brand-mark" aria-hidden="true">S</span>
+                <span class="brand-name">SENTINELA<span>APPSEC</span></span>
+                <span class="brand-status"><span aria-hidden="true"></span> ETAPA 2 DE 2</span>
+            </div>
+            <p class="eyebrow">AUTENTICAÇÃO GITHUB CORPORATIVO</p>
+            <h1 id="github-title">Conecte sua<br><em>conta GitHub.</em></h1>
+            <p class="intro-copy">O Sentinela usa sua conta GitHub corporativa para listar e analisar os repositórios privados aos quais você tem acesso. O token fica apenas no servidor e é revogado ao sair.</p>
+            <p class="field-hint">A conta GitHub precisa ter o mesmo e-mail @greylogix.com.br do seu login Microsoft, verificado em GitHub &gt; Settings &gt; Emails.</p>
+            <a class="primary-button login-button" href="/auth/github"><span>Entrar com GitHub</span><span aria-hidden="true">↗</span></a>
+            <p class="auth-error" id="github-gate-error" role="alert" hidden></p>
+            <button class="mini-button gate-logout" type="button" data-logout>Sair</button>
         </section>
 
         <div id="application-content" hidden>
         <div class="user-bar">
-            <span>Conectado como <strong id="signed-in-user"></strong></span>
-            <button class="secondary-button" id="logout-button" type="button">Sair</button>
+            <span>Conectado como <strong id="signed-in-user"></strong> <span class="role-badge" id="role-badge"></span></span>
+            <span class="github-status" id="github-status" hidden></span>
+            <a class="secondary-button" id="admin-link" href="/admin" hidden>Painel admin</a>
+            <button class="secondary-button" id="logout-button" type="button" data-logout>Sair</button>
         </div>
         <section class="intro">
             <div class="brand-bar">
@@ -51,7 +100,7 @@
 
             <div class="source-tabs" role="tablist" aria-label="Tipo de análise">
                 <button class="source-tab active" id="tab-zip" role="tab" aria-selected="true" aria-controls="panel-zip" type="button">Enviar projeto</button>
-                <button class="source-tab" id="tab-github" role="tab" aria-selected="false" aria-controls="panel-github" type="button">GitHub público</button>
+                <button class="source-tab" id="tab-github" role="tab" aria-selected="false" aria-controls="panel-github" type="button">Repositório GitHub</button>
                 <button class="source-tab" id="tab-pentest" role="tab" aria-selected="false" aria-controls="panel-pentest" type="button">Teste dinâmico</button>
             </div>
 
@@ -65,9 +114,19 @@
                     </label>
                 </div>
                 <div class="source-panel" id="panel-github" role="tabpanel" aria-labelledby="tab-github" hidden>
+                    <div class="github-connect" id="github-connect">
+                        <p class="field-hint" id="github-connect-hint">Conecte sua conta GitHub corporativa para escolher repositórios privados.</p>
+                        <a class="secondary-button" id="github-connect-button" href="/auth/github">Conectar GitHub</a>
+                    </div>
+                    <div id="github-repo-picker" hidden>
+                        <label class="field-label" for="github-repo-filter">Seus repositórios</label>
+                        <input class="text-input" id="github-repo-filter" type="search" placeholder="Filtrar por nome..." autocomplete="off">
+                        <select class="text-input repo-select" id="github-repo-select" size="6" aria-label="Repositórios disponíveis"></select>
+                        <p class="field-hint" id="github-repo-hint">Carregando repositórios...</p>
+                    </div>
                     <label class="field-label" for="github-url">Endereço HTTPS do repositório</label>
                     <input class="text-input" id="github-url" name="githubUrl" type="url" placeholder="https://github.com/organizacao/projeto" autocomplete="url">
-                    <p class="field-hint">Apenas repositórios públicos. O servidor consulta o código durante a análise.</p>
+                    <p class="field-hint" id="github-url-hint">Sem conta GitHub conectada, apenas repositórios públicos podem ser analisados.</p>
                 </div>
                 <div class="source-panel" id="panel-pentest" role="tabpanel" aria-labelledby="tab-pentest" hidden>
                     <label class="field-label" for="pentest-url">URL da aplicação em homologação</label>
@@ -80,9 +139,9 @@
                             <input type="radio" name="pentestMode" value="baseline" checked>
                             <span><strong>Passivo</strong><small>Navega pela aplicação e analisa as respostas: cabeçalhos, cookies, exposição de informações. Não envia ataques. Cerca de 2 a 5 minutos.</small></span>
                         </label>
-                        <label class="mode-option">
-                            <input type="radio" name="pentestMode" value="full">
-                            <span><strong>Ativo</strong><small>Envia ataques reais (SQL injection, XSS, path traversal etc.). Pode criar, alterar ou apagar dados e gerar carga. Use apenas em homologação. Até 30 minutos.</small></span>
+                        <label class="mode-option" id="mode-option-full">
+                            <input type="radio" name="pentestMode" value="full" id="pentest-mode-full">
+                            <span><strong>Ativo</strong><small>Envia ataques reais (SQL injection, XSS, path traversal etc.). Pode criar, alterar ou apagar dados e gerar carga. Use apenas em homologação. Até 30 minutos.</small><small class="role-lock" id="active-lock" hidden>Disponível apenas para os perfis Avançado e Administrador. Solicite acesso a um administrador.</small></span>
                         </label>
                     </fieldset>
 
@@ -112,6 +171,14 @@
                 <div class="verdict-mark" id="verdict-mark" aria-hidden="true">!</div>
                 <div class="verdict-copy"><span class="eyebrow" id="verdict-eyebrow">RECOMENDAÇÃO</span><h3 id="verdict-title">Análise concluída</h3><p id="verdict-description"></p></div>
                 <div class="finding-count"><strong id="finding-total">0</strong><span>achados</span></div>
+            </div>
+            <div class="project-profile" id="project-profile" hidden>
+                <div><span class="eyebrow">SOBRE O PROJETO</span><p id="profile-description"></p></div>
+                <dl>
+                    <div><dt>Responsável</dt><dd id="profile-responsible"></dd></div>
+                    <div><dt>Categoria</dt><dd id="profile-category"></dd></div>
+                    <div><dt>Tecnologias</dt><dd id="profile-technologies"></dd></div>
+                </dl>
             </div>
             <div class="metrics" id="metrics"></div>
             <div class="scan-notes" id="scan-notes"></div>

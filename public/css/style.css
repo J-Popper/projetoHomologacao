@@ -1529,3 +1529,616 @@ h1 em {
 .hint-error {
     color: var(--red) !important;
 }
+
+/* ---- Perfis de acesso, login local e GitHub ---- */
+.stack-form {
+    display: grid;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.stack-form .field-label {
+    margin-top: 6px;
+}
+
+.stack-form .text-input {
+    border-radius: 8px;
+}
+
+.stack-form button {
+    width: fit-content;
+    margin-top: 10px;
+}
+
+.local-login {
+    margin-top: 28px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.local-login summary {
+    cursor: pointer;
+}
+
+.local-login summary:hover {
+    color: var(--ink);
+}
+
+.gate-logout {
+    margin-top: 22px;
+    border-radius: 7px;
+    color: var(--muted);
+}
+
+.user-bar {
+    flex-wrap: wrap;
+}
+
+.user-bar a.secondary-button {
+    color: var(--ink);
+    text-decoration: none;
+}
+
+.role-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: 99px;
+    font: 9px var(--mono);
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+}
+
+.role-badge:empty {
+    display: none;
+}
+
+.role-badge.admin {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.role-badge.advanced {
+    border-color: var(--blue);
+    color: var(--blue);
+}
+
+.github-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.github-status .mini-button,
+.github-connect .secondary-button {
+    border-radius: 7px;
+    color: var(--ink);
+    text-decoration: none;
+}
+
+.github-status a.mini-button {
+    display: inline-flex;
+    align-items: center;
+}
+
+.github-connect {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 18px;
+    padding: 12px 14px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 10px;
+}
+
+.github-connect .field-hint {
+    margin: 0;
+}
+
+#github-repo-picker {
+    margin-bottom: 18px;
+}
+
+.repo-select {
+    height: auto;
+    margin-top: 6px;
+    padding: 4px;
+    border-radius: 8px;
+}
+
+.repo-select option {
+    padding: 6px 8px;
+    border-radius: 5px;
+}
+
+.mode-option.locked {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.role-lock {
+    color: var(--amber) !important;
+}
+
+.project-profile {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 20px;
+    margin: 14px 0;
+    padding: 18px 20px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+}
+
+.project-profile p {
+    margin: 8px 0 0;
+    line-height: 1.6;
+}
+
+.project-profile dl {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+}
+
+.project-profile dt {
+    color: var(--muted);
+    font: 9px var(--mono);
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+}
+
+.project-profile dd {
+    margin: 2px 0 0;
+}
+
+@media (max-width: 620px) {
+    .project-profile {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ---- Painel administrativo ---- */
+.admin-main {
+    width: min(1240px, calc(100% - 32px));
+}
+
+.admin-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 22px 0 18px;
+}
+
+.admin-header .brand-bar {
+    margin: 0;
+}
+
+.admin-header .spacer {
+    flex: 1;
+}
+
+.admin-header .user-label {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.admin-header a.secondary-button {
+    color: var(--ink);
+    text-decoration: none;
+}
+
+.admin-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 18px;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: var(--surface);
+}
+
+.admin-tab {
+    padding: 9px 14px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.admin-tab.active {
+    background: var(--surface-3);
+    color: var(--ink);
+    box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.admin-panel {
+    padding: 22px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surface);
+}
+
+.admin-panel h2 {
+    margin: 0 0 14px;
+}
+
+.admin-panel h3 {
+    margin: 22px 0 10px;
+    font-size: 13px;
+}
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+}
+
+.stat {
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-2);
+}
+
+.stat strong {
+    display: block;
+    font-size: 26px;
+    font-variant-numeric: tabular-nums;
+}
+
+.stat span {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.stat.alert strong {
+    color: var(--red);
+}
+
+.bar-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    height: 130px;
+    padding: 10px 0 0;
+}
+
+.bar-chart div {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    height: 100%;
+    gap: 4px;
+    color: var(--muted);
+    font: 9px var(--mono);
+}
+
+.bar-chart i {
+    display: block;
+    width: 100%;
+    min-height: 2px;
+    border-radius: 4px 4px 0 0;
+    background: var(--accent);
+}
+
+.toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 14px;
+}
+
+.toolbar .text-input {
+    width: auto;
+    min-width: 200px;
+    flex: 1;
+    border-radius: 8px;
+}
+
+.toolbar select.text-input {
+    flex: 0 1 200px;
+    min-width: 150px;
+}
+
+.toolbar a.secondary-button {
+    color: var(--ink);
+    text-decoration: none;
+}
+
+.table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.admin-table th,
+.admin-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    vertical-align: top;
+}
+
+.admin-table th {
+    background: var(--surface-2);
+    color: var(--muted);
+    font: 9px var(--mono);
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.admin-table tbody tr:hover {
+    background: var(--surface-2);
+}
+
+.admin-table tr.clickable {
+    cursor: pointer;
+}
+
+.admin-table td small {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.admin-table select.text-input {
+    height: 32px;
+    min-width: 130px;
+    border-radius: 6px;
+}
+
+.row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.row-actions .mini-button {
+    border-radius: 6px;
+}
+
+.mini-button.danger {
+    border-color: rgba(255, 107, 91, 0.5);
+    color: var(--red);
+}
+
+.pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 99px;
+    background: var(--surface-3);
+    font: 9px var(--mono);
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+}
+
+.pill.danger {
+    background: rgba(255, 107, 91, 0.15);
+    color: var(--red);
+}
+
+.pill.review {
+    background: rgba(242, 184, 75, 0.15);
+    color: var(--amber);
+}
+
+.pill.ok {
+    background: rgba(111, 168, 220, 0.15);
+    color: var(--blue);
+}
+
+.pill.accent {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.sev-counts {
+    font: 11px var(--mono);
+    white-space: nowrap;
+}
+
+.sev-counts .c { color: var(--red); }
+.sev-counts .h { color: #ff8f6b; }
+.sev-counts .m { color: var(--amber); }
+
+.empty-state {
+    padding: 28px;
+    color: var(--muted);
+    text-align: center;
+}
+
+.inline-form {
+    display: grid;
+    grid-template-columns: 2fr 1.4fr 1fr auto;
+    gap: 8px;
+    align-items: end;
+    margin-bottom: 16px;
+    padding: 14px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 10px;
+}
+
+.inline-form .text-input {
+    border-radius: 8px;
+}
+
+.inline-form .field-label {
+    display: block;
+    margin-bottom: 6px;
+}
+
+.config-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 8px;
+    margin: 0;
+}
+
+.config-list div {
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-2);
+    font-size: 12px;
+}
+
+.config-list dt {
+    color: var(--muted);
+    font: 9px var(--mono);
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+}
+
+.config-list dd {
+    margin: 4px 0 0;
+    word-break: break-word;
+}
+
+.role-help {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.role-help div {
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.role-help strong {
+    display: block;
+    margin-bottom: 4px;
+}
+
+dialog.admin-dialog {
+    width: min(860px, calc(100% - 24px));
+    max-height: calc(100vh - 40px);
+    padding: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    background: var(--surface);
+    color: var(--ink);
+}
+
+dialog.admin-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.7);
+}
+
+.dialog-body {
+    padding: 22px;
+}
+
+.dialog-head {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    justify-content: space-between;
+}
+
+.dialog-head h2 {
+    margin: 0;
+    word-break: break-word;
+}
+
+.dialog-meta {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.dialog-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.dialog-grid label {
+    display: grid;
+    gap: 6px;
+}
+
+.dialog-grid .full {
+    grid-column: 1 / -1;
+}
+
+.dialog-grid textarea.text-input {
+    height: auto;
+    min-height: 80px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 12px;
+    resize: vertical;
+}
+
+.dialog-grid .text-input {
+    border-radius: 8px;
+}
+
+.dialog-findings {
+    display: grid;
+    gap: 6px;
+    max-height: 320px;
+    overflow-y: auto;
+    margin-top: 8px;
+}
+
+.dialog-findings div {
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    font-size: 12px;
+}
+
+.dialog-findings small {
+    display: block;
+    color: var(--muted);
+}
+
+.dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 18px;
+}
+
+@media (max-width: 760px) {
+    .inline-form,
+    .dialog-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .admin-panel {
+        padding: 14px;
+    }
+}

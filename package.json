@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "tools:pull": "node scripts/pull-tools.js"
+    "tools:pull": "node scripts/pull-tools.js",
+    "admin:reset-password": "node scripts/reset-admin-password.js"
   },
   "engines": {
     "node": ">=20"

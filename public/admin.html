@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0b0b0b">
+    <meta name="sentinela-api-base" content="">
+    <title>Sentinela | Painel admin</title>
+    <link rel="stylesheet" href="/css/style.css">
+    <script src="/js/admin.js" defer></script>
+</head>
+<body>
+    <main class="admin-main">
+        <header class="admin-header">
+            <div class="brand-bar">
+                <span class="brand-mark" aria-hidden="true">S</span>
+                <span class="brand-name">SENTINELA<span>PAINEL ADMIN</span></span>
+            </div>
+            <span class="spacer"></span>
+            <span class="user-label">Conectado como <strong id="admin-user"></strong></span>
+            <a class="secondary-button" href="/">Voltar às análises</a>
+            <button class="secondary-button" id="logout-button" type="button">Sair</button>
+        </header>
+
+        <nav class="admin-tabs" role="tablist" aria-label="Seções do painel">
+            <button class="admin-tab active" type="button" role="tab" data-tab="overview">Visão geral</button>
+            <button class="admin-tab" type="button" role="tab" data-tab="projects">Projetos</button>
+            <button class="admin-tab" type="button" role="tab" data-tab="users">Usuários e perfis</button>
+            <button class="admin-tab" type="button" role="tab" data-tab="sessions">Sessões ativas</button>
+            <button class="admin-tab" type="button" role="tab" data-tab="jobs">Análises em execução</button>
+            <button class="admin-tab" type="button" role="tab" data-tab="audit">Auditoria</button>
+            <button class="admin-tab" type="button" role="tab" data-tab="settings">Configuração</button>
+        </nav>
+
+        <section class="admin-panel" data-panel="overview">
+            <h2>Visão geral</h2>
+            <div class="stat-grid" id="overview-stats"></div>
+            <h3>Análises nos últimos 14 dias</h3>
+            <div class="bar-chart" id="overview-timeline" aria-label="Análises por dia"></div>
+            <h3>Achados acumulados por gravidade</h3>
+            <div class="stat-grid" id="overview-severity"></div>
+            <h3>Projetos com mais achados críticos e altos</h3>
+            <div class="table-wrap"><table class="admin-table"><thead><tr><th>Projeto</th><th>Responsável</th><th>Críticos / Altos</th><th>Data</th></tr></thead><tbody id="overview-riskiest"></tbody></table></div>
+        </section>
+
+        <section class="admin-panel" data-panel="projects" hidden>
+            <h2>Projetos analisados</h2>
+            <div class="toolbar">
+                <input class="text-input" id="project-search" type="search" placeholder="Buscar por projeto, responsável, descrição ou usuário...">
+                <select class="text-input" id="project-recommendation" aria-label="Filtrar por recomendação">
+                    <option value="">Todas as recomendações</option>
+                    <option>NÃO RECOMENDADO</option>
+                    <option>REVISÃO MANUAL</option>
+                    <option>APTO COM RESSALVAS</option>
+                </select>
+                <select class="text-input" id="project-source" aria-label="Filtrar por origem">
+                    <option value="">Todas as origens</option>
+                    <option value="github">GitHub</option>
+                    <option value="zip">ZIP</option>
+                    <option value="pentest">Teste dinâmico</option>
+                </select>
+                <select class="text-input" id="project-status" aria-label="Filtrar por status"><option value="">Todos os status</option></select>
+                <a class="secondary-button" id="projects-csv" href="/api/admin/projects.csv">Exportar CSV</a>
+            </div>
+            <div class="table-wrap">
+                <table class="admin-table">
+                    <thead><tr><th>Projeto</th><th>Sobre o projeto</th><th>Responsável</th><th>Executado por</th><th>Resultado</th><th>Status</th><th>Data</th></tr></thead>
+                    <tbody id="projects-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="admin-panel" data-panel="users" hidden>
+            <h2>Usuários e perfis de acesso</h2>
+            <div class="role-help">
+                <div><strong>Administrador</strong>Todas as funções: análises, teste dinâmico passivo e ativo, e este painel.</div>
+                <div><strong>Avançado</strong>Análises de código e teste dinâmico passivo e <em>ativo</em>. Sem painel admin.</div>
+                <div><strong>Básico</strong>Análises de código e teste dinâmico passivo. Sem teste ativo e sem painel admin. Perfil padrão no primeiro login.</div>
+            </div>
+            <form class="inline-form" id="user-form">
+                <label><span class="field-label">E-mail Microsoft</span><input class="text-input" id="new-user-email" type="email" placeholder="pessoa@greylogix.com.br" required></label>
+                <label><span class="field-label">Nome (opcional)</span><input class="text-input" id="new-user-name"></label>
+                <label><span class="field-label">Perfil</span><select class="text-input" id="new-user-role"></select></label>
+                <button class="primary-button" type="submit"><span>Conceder acesso</span></button>
+            </form>
+            <div class="toolbar">
+                <input class="text-input" id="user-search" type="search" placeholder="Buscar usuário...">
+            </div>
+            <div class="table-wrap">
+                <table class="admin-table">
+                    <thead><tr><th>Usuário</th><th>Perfil</th><th>Situação</th><th>Último login</th><th>Análises</th><th>Ações</th></tr></thead>
+                    <tbody id="users-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="admin-panel" data-panel="sessions" hidden>
+            <h2>Sessões ativas</h2>
+            <div class="table-wrap">
+                <table class="admin-table">
+                    <thead><tr><th>Usuário</th><th>Perfil</th><th>Tipo</th><th>GitHub</th><th>Origem</th><th>Última atividade</th><th>Expira</th><th></th></tr></thead>
+                    <tbody id="sessions-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="admin-panel" data-panel="jobs" hidden>
+            <h2>Análises em execução e recentes</h2>
+            <div class="toolbar"><button class="secondary-button" type="button" id="jobs-refresh">Atualizar</button></div>
+            <div class="table-wrap">
+                <table class="admin-table">
+                    <thead><tr><th>Tipo</th><th>Projeto / alvo</th><th>Usuário</th><th>Situação</th><th>Etapa</th><th>Duração</th></tr></thead>
+                    <tbody id="jobs-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="admin-panel" data-panel="audit" hidden>
+            <h2>Trilha de auditoria</h2>
+            <div class="toolbar">
+                <input class="text-input" id="audit-search" type="search" placeholder="Filtrar por usuário, ação ou detalhe...">
+                <a class="secondary-button" id="audit-csv" href="/api/admin/audit.csv">Exportar CSV</a>
+            </div>
+            <div class="table-wrap">
+                <table class="admin-table">
+                    <thead><tr><th>Data</th><th>Usuário</th><th>Ação</th><th>Detalhes</th></tr></thead>
+                    <tbody id="audit-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="admin-panel" data-panel="settings" hidden>
+            <h2>Configuração do serviço</h2>
+            <dl class="config-list" id="settings-list"></dl>
+            <h3>Senha da conta admin local</h3>
+            <p class="field-hint" id="local-admin-hint">Disponível apenas quando conectado com a conta admin local.</p>
+            <form class="stack-form" id="admin-password-form" hidden>
+                <label class="field-label" for="admin-current-password">Senha atual</label>
+                <input class="text-input" id="admin-current-password" type="password" autocomplete="current-password" required>
+                <label class="field-label" for="admin-new-password">Nova senha (mínimo 12 caracteres)</label>
+                <input class="text-input" id="admin-new-password" type="password" autocomplete="new-password" minlength="12" required>
+                <button class="secondary-button" type="submit">Alterar senha</button>
+            </form>
+        </section>
+
+        <footer class="page-footer"><span>SENTINELA <span class="footer-divider">/</span> PAINEL ADMINISTRATIVO</span><span id="admin-updated"></span></footer>
+    </main>
+
+    <dialog class="admin-dialog" id="project-dialog">
+        <div class="dialog-body">
+            <div class="dialog-head">
+                <div>
+                    <span class="eyebrow" id="dialog-eyebrow">PROJETO</span>
+                    <h2 id="dialog-title"></h2>
+                    <p class="dialog-meta" id="dialog-meta"></p>
+                </div>
+                <button class="mini-button" type="button" id="dialog-close">Fechar</button>
+            </div>
+            <form class="dialog-grid" id="project-form">
+                <label class="full"><span class="field-label">Descrição (gerada pela IA, editável)</span><textarea class="text-input" id="dialog-description" maxlength="800"></textarea></label>
+                <label><span class="field-label">Responsável</span><input class="text-input" id="dialog-responsible" maxlength="200"><small class="field-hint" id="dialog-responsible-basis"></small></label>
+                <label><span class="field-label">Status da homologação</span><select class="text-input" id="dialog-status"></select></label>
+                <label class="full"><span class="field-label">Notas internas</span><textarea class="text-input" id="dialog-notes" maxlength="2000" placeholder="Decisões, exceções aceitas, prazos de correção..."></textarea></label>
+            </form>
+            <h3>Principais achados</h3>
+            <div class="dialog-findings" id="dialog-findings"></div>
+            <div class="dialog-actions">
+                <button class="mini-button danger" type="button" id="dialog-delete">Excluir registro</button>
+                <button class="secondary-button" type="button" id="dialog-docx">Baixar relatório DOCX</button>
+                <button class="primary-button" type="button" id="dialog-save"><span>Salvar alterações</span></button>
+            </div>
+        </div>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

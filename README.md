@@ -1,6 +1,6 @@
 # Sentinela
 
-Aplicação web para triagem inicial de segurança de projetos enviados em ZIP ou hospedados em repositórios públicos do GitHub.
+Aplicação web para triagem inicial de segurança de projetos enviados em ZIP ou hospedados no GitHub (públicos ou, com login GitHub corporativo, privados), com perfis de acesso e painel administrativo.
 
 ## Iniciar no Windows
 
@@ -36,7 +36,52 @@ Se o callback retornar `invalid_client`, crie um novo segredo no Entra ID e copi
 
 O servidor usa Authorization Code com PKCE, valida estado/nonce, assinatura e claims do ID token e mantém uma sessão temporária em cookie `HttpOnly`, `SameSite=Lax` e `Secure` em produção. Além de restringir o login ao tenant configurado, compara o domínio do `preferred_username` assinado pela Microsoft com a lista `MICROSOFT_ALLOWED_EMAIL_DOMAINS`, sem diferenciar maiúsculas/minúsculas. Por padrão, apenas `greylogix.com.br` é aceito; domínios externos continuam bloqueados.
 
-As sessões e relatórios são mantidos apenas na memória do processo, expiram em até 8 horas e são perdidos ao reiniciar o servidor. Para múltiplas instâncias, será necessário armazenamento compartilhado de sessões; não use este armazenamento em memória como sessão distribuída.
+As sessões são mantidas apenas na memória do processo, expiram em até 8 horas e são perdidas ao reiniciar o servidor. Perfis, histórico de projetos, relatórios e auditoria ficam em `data/` (veja abaixo). Para múltiplas instâncias, será necessário armazenamento compartilhado de sessões; não use este armazenamento em memória como sessão distribuída.
+
+## Perfis de acesso e painel admin
+
+Há três perfis:
+
+| Perfil | Análise de código (ZIP/GitHub) | Teste dinâmico passivo | Teste dinâmico **ativo** | Painel admin |
+| --- | --- | --- | --- | --- |
+| Básico (padrão no primeiro login) | sim | sim | não | não |
+| Avançado | sim | sim | sim | não |
+| Administrador | sim | sim | sim | sim |
+
+As permissões são verificadas no servidor; a interface apenas oculta ou desabilita o que o perfil não permite. Mudanças de perfil e bloqueios valem imediatamente, inclusive para sessões abertas.
+
+**Conta admin local.** Existe uma conta local (usuário `admin`) que entra sem Microsoft, pelo link "Entrar com a conta administrativa local" na tela de login, e serve para conceder os primeiros acessos. A senha é armazenada apenas como hash scrypt em `data/sentinela.json`; a troca é obrigatória no primeiro login; após 5 tentativas erradas a conta fica bloqueada por 15 minutos. Para gerar uma nova senha (por exemplo, se ela for esquecida), pare o servidor e execute `npm.cmd run admin:reset-password`. Na primeira inicialização sem conta existente, o servidor gera uma senha e a exibe uma única vez no log (ou usa `LOCAL_ADMIN_INITIAL_PASSWORD`, se definida). `ADMIN_EMAILS` (lista separada por vírgula) promove contas Microsoft a Administrador automaticamente no login.
+
+O painel fica em `http://localhost:3000/admin` (link "Painel admin" no topo da aplicação) e oferece:
+
+- **Visão geral:** totais de projetos, não recomendados, pendentes de decisão, repositórios privados, usuários, sessões e análises em execução; gráfico de análises dos últimos 14 dias; achados acumulados por gravidade; projetos com mais achados críticos/altos.
+- **Projetos:** todos os projetos analisados, com descrição breve e responsável sugeridos pela IA (a partir de README, manifestos, CODEOWNERS e dono/contribuidores do GitHub), quem executou, recomendação e achados. Filtros, busca, exportação CSV, detalhes com os principais achados, download do DOCX, edição de descrição/responsável, status da homologação (pendente, em correção, aprovado, reprovado, risco aceito), notas internas e exclusão do registro.
+- **Usuários e perfis:** conceder acesso antecipado por e-mail, alterar perfil, bloquear/desbloquear, encerrar sessões e excluir usuários. Um administrador não pode rebaixar nem bloquear a si mesmo.
+- **Sessões ativas:** quem está conectado, de onde, com qual conta GitHub, e encerramento de sessões.
+- **Análises em execução:** tarefas em andamento e recentes, com etapa, duração e erros.
+- **Auditoria:** logins (inclusive falhas), conexões GitHub, análises, testes dinâmicos, acessos negados por perfil e todas as ações administrativas, com busca e exportação CSV.
+- **Configuração:** situação das integrações (Microsoft, GitHub, IA, e-mail, Docker, hosts de pentest) e troca de senha da conta local.
+
+Perfis, histórico de projetos, relatórios completos e auditoria são persistidos em `data/` (ou em `DATA_DIR`), excluído do Git. Os relatórios contêm trechos de código (com segredos mascarados): restrinja o acesso a esse diretório e, se o projeto estiver em uma pasta sincronizada (OneDrive), considere apontar `DATA_DIR` para fora dela. São mantidos os 2.000 projetos e 5.000 registros de auditoria mais recentes.
+
+## Login GitHub corporativo (repositórios privados)
+
+Depois do login Microsoft, cada pessoa pode conectar sua conta GitHub corporativa para listar e analisar os repositórios privados aos quais tem acesso. O token do GitHub fica apenas na memória do servidor, nunca vai ao navegador e é revogado ao sair ou desconectar.
+
+1. No GitHub, crie um **OAuth App** na organização (Settings > Developer settings > OAuth Apps > New OAuth App).
+2. Em **Authorization callback URL**, use exatamente `http://localhost:3000/auth/github/callback` (em produção, a URL HTTPS pública).
+3. Configure em `config\.env`:
+
+| Variável | Uso |
+| --- | --- |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | Credenciais do OAuth App (o segredo fica só no servidor). |
+| `GITHUB_REDIRECT_URI` | A mesma callback URL cadastrada. |
+| `GITHUB_ALLOWED_ORGS` | Organizações aceitas, separadas por vírgula (recomendado). Contas fora delas são recusadas, e só os repositórios dessas organizações aparecem na lista. |
+| `GITHUB_LOGIN_REQUIRED` | `true` torna o login GitHub obrigatório logo após o login Microsoft (a conta admin local é dispensada). Padrão: opcional, necessário apenas para repositórios privados. |
+
+**Mesma identidade:** a conta GitHub só é aceita se tiver, **verificado**, exatamente o mesmo e-mail do login Microsoft (ex.: `pessoa@greylogix.com.br`); caso contrário, o token é revogado na hora e a tentativa fica na auditoria. Cada pessoa deve adicionar e verificar o e-mail corporativo em GitHub > Settings > Emails (pode ser um e-mail secundário). Para a conta admin local, que não tem e-mail Microsoft, exige-se um e-mail verificado de um domínio de `MICROSOFT_ALLOWED_EMAIL_DOMAINS`.
+
+O escopo solicitado é `repo read:org read:user user:email`: o GitHub OAuth não oferece escopo somente leitura para repositórios privados, mas o Sentinela só lista repositórios e baixa o ZIP. Se a organização usa restrição de acesso de OAuth Apps, um owner precisa aprovar o app. Para escopo mais restrito por repositório, considere um GitHub App no futuro.
 
 ## Desenvolvimento com Live Server
 
@@ -108,5 +153,5 @@ O servidor escuta apenas em loopback por padrão. Mesmo com SSO habilitado, defi
 - Termine TLS no proxy reverso e limite o acesso à porta do Node ao próprio proxy; o app não configura TLS.
 - Configure `TRUST_PROXY_HOPS` conforme o número real de proxies confiáveis; não habilite confiança ampla de cabeçalhos encaminhados em uma porta acessível diretamente pela Internet.
 - Garanta acesso de saída a `login.microsoftonline.com`, `api.openai.com` e `api.osv.dev`; SMTP também precisa de saída quando habilitado.
-- Use uma única instância: sessões, tentativas de login e relatórios são mantidos em memória e não sobrevivem a reinicializações. Para alta disponibilidade ou múltiplas instâncias, é necessário implementar armazenamento compartilhado antes da implantação.
+- Use uma única instância: sessões e tentativas de login são mantidas em memória e não sobrevivem a reinicializações; perfis, projetos e auditoria ficam em arquivo local (`DATA_DIR`). Para alta disponibilidade ou múltiplas instâncias, é necessário implementar armazenamento compartilhado antes da implantação.
 - Valide `/api/health`, os logs do processo, autenticação SSO e os fluxos de análise/relatório em homologação. O endpoint de saúde não verifica conectividade ou validade das credenciais dos serviços externos.

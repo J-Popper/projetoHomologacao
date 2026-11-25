@@ -107,7 +107,7 @@ form.addEventListener('submit', async (event) => {
         endpoint = '/api/scan/zip';
     } else {
         const url = document.querySelector('#github-url').value.trim();
-        if (!url) return showToast('Informe a URL do repositório público.');
+        if (!url) return showToast('Informe a URL do repositório GitHub.');
         options.headers['Content-Type'] = 'application/json';
         options.body = JSON.stringify({ url });
         endpoint = '/api/scan/github';
@@ -129,22 +129,201 @@ form.addEventListener('submit', async (event) => {
     }
 });
 
-document.querySelector('#logout-button').addEventListener('click', async (event) => {
-    const button = event.currentTarget;
-    button.disabled = true;
+for (const logoutButton of document.querySelectorAll('[data-logout]')) {
+    logoutButton.addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+            await fetchJson('/api/auth/logout', { method: 'POST' });
+            window.location.assign(`${apiBaseUrl}/`);
+        } catch (error) {
+            button.disabled = false;
+            showToast(error.message || 'Não foi possível encerrar a sessão.');
+        }
+    });
+}
+
+document.querySelector('#local-login-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const errorElement = document.querySelector('#local-login-error');
+    const submit = event.currentTarget.querySelector('button[type="submit"]');
+    errorElement.hidden = true;
+    submit.disabled = true;
     try {
-        await fetchJson('/api/auth/logout', { method: 'POST' });
-        window.location.assign(`${apiBaseUrl}/`);
+        await fetchJson('/api/auth/local', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: document.querySelector('#local-username').value,
+                password: document.querySelector('#local-password').value
+            })
+        }, 15000);
+        document.querySelector('#local-password').value = '';
+        await loadAuthStatus();
     } catch (error) {
-        button.disabled = false;
-        showToast(error.message || 'Não foi possível encerrar a sessão.');
+        errorElement.textContent = error.message;
+        errorElement.hidden = false;
+    } finally {
+        submit.disabled = false;
     }
 });
+
+document.querySelector('#password-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const errorElement = document.querySelector('#password-error');
+    const newPassword = document.querySelector('#new-password').value;
+    errorElement.hidden = true;
+    if (newPassword !== document.querySelector('#confirm-password').value) {
+        errorElement.textContent = 'A confirmação não corresponde à nova senha.';
+        errorElement.hidden = false;
+        return;
+    }
+    try {
+        await fetchJson('/api/account/password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ currentPassword: document.querySelector('#current-password').value, newPassword })
+        }, 15000);
+        event.currentTarget.reset();
+        showToast('Senha alterada com sucesso.');
+        await loadAuthStatus();
+    } catch (error) {
+        errorElement.textContent = error.message;
+        errorElement.hidden = false;
+    }
+});
+
+let authStatus = null;
+let githubRepositories = [];
+
+function showOnly(section) {
+    authGate.hidden = section !== 'auth';
+    document.querySelector('#password-gate').hidden = section !== 'password';
+    document.querySelector('#github-gate').hidden = section !== 'github';
+    applicationContent.hidden = section !== 'app';
+}
+
+function applyPermissions(status) {
+    const role = status.user?.role;
+    const badge = document.querySelector('#role-badge');
+    badge.textContent = status.user?.roleLabel || '';
+    badge.className = `role-badge ${role || ''}`;
+    document.querySelector('#admin-link').hidden = !status.permissions?.adminPanel;
+    document.querySelector('#admin-link').href = `${apiBaseUrl}/admin`;
+
+    const canActive = Boolean(status.permissions?.activePentest);
+    const fullRadio = document.querySelector('#pentest-mode-full');
+    fullRadio.disabled = !canActive;
+    if (!canActive && fullRadio.checked) document.querySelector('input[name="pentestMode"][value="baseline"]').checked = true;
+    document.querySelector('#mode-option-full').classList.toggle('locked', !canActive);
+    document.querySelector('#active-lock').hidden = canActive;
+
+    const gh = status.github || {};
+    const githubStatus = document.querySelector('#github-status');
+    githubStatus.hidden = !gh.configured;
+    githubStatus.replaceChildren();
+    if (gh.configured) {
+        if (gh.connected) {
+            const label = document.createElement('span');
+            label.textContent = `GitHub: @${gh.login}`;
+            const disconnect = document.createElement('button');
+            disconnect.type = 'button';
+            disconnect.className = 'mini-button';
+            disconnect.textContent = 'Desconectar';
+            disconnect.addEventListener('click', disconnectGithub);
+            githubStatus.append(label, disconnect);
+        } else {
+            const link = document.createElement('a');
+            link.className = 'mini-button';
+            link.href = `${apiBaseUrl}/auth/github`;
+            link.textContent = 'Conectar GitHub';
+            githubStatus.append(link);
+        }
+    }
+    document.querySelector('#github-connect').hidden = !gh.configured || gh.connected;
+    document.querySelector('#github-connect-button').href = `${apiBaseUrl}/auth/github`;
+    document.querySelector('#github-repo-picker').hidden = !gh.connected;
+    document.querySelector('#github-url-hint').textContent = gh.connected
+        ? `Usando a conta GitHub @${gh.login}: repositórios privados aos quais você tem acesso podem ser analisados.`
+        : 'Sem conta GitHub conectada, apenas repositórios públicos podem ser analisados.';
+    if (gh.connected && !githubRepositories.length) loadGithubRepositories();
+}
+
+async function disconnectGithub() {
+    try {
+        await fetchJson('/api/github/disconnect', { method: 'POST' });
+        githubRepositories = [];
+        showToast('Conta GitHub desconectada e token revogado.');
+        await loadAuthStatus();
+    } catch (error) {
+        showToast(error.message);
+    }
+}
+
+async function loadGithubRepositories() {
+    const hint = document.querySelector('#github-repo-hint');
+    hint.textContent = 'Carregando repositórios...';
+    try {
+        const data = await fetchJson('/api/github/repos', {}, 30000);
+        githubRepositories = data.repositories;
+        renderRepositoryOptions();
+        hint.textContent = githubRepositories.length
+            ? `${githubRepositories.length} repositório(s) disponíveis. Selecione um para preencher o endereço.`
+            : 'Nenhum repositório disponível para esta conta (ou fora das organizações autorizadas).';
+    } catch (error) {
+        hint.textContent = error.message;
+        if (/conecte|expirou/i.test(error.message)) loadAuthStatus();
+    }
+}
+
+function renderRepositoryOptions() {
+    const filter = document.querySelector('#github-repo-filter').value.trim().toLowerCase();
+    const select = document.querySelector('#github-repo-select');
+    select.replaceChildren(...githubRepositories
+        .filter((repo) => !filter || repo.fullName.toLowerCase().includes(filter) || repo.description.toLowerCase().includes(filter))
+        .slice(0, 300)
+        .map((repo) => {
+            const option = document.createElement('option');
+            option.value = repo.url;
+            option.textContent = `${repo.private ? '🔒 ' : ''}${repo.fullName}${repo.description ? ` — ${repo.description.slice(0, 80)}` : ''}`;
+            return option;
+        }));
+}
+
+document.querySelector('#github-repo-filter').addEventListener('input', renderRepositoryOptions);
+document.querySelector('#github-repo-select').addEventListener('change', (event) => {
+    document.querySelector('#github-url').value = event.currentTarget.value;
+});
+
+function showGithubCallbackMessage() {
+    const params = new URLSearchParams(window.location.search);
+    const githubError = params.get('githubError');
+    const connected = params.get('github') === 'connected';
+    if (!githubError && !connected) return;
+    const messages = {
+        not_configured: 'O login GitHub não está configurado no servidor (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_REDIRECT_URI).',
+        expired: 'A tentativa de login GitHub expirou. Tente novamente.',
+        denied: 'O GitHub não autorizou o acesso. Tente novamente e aprove a solicitação.',
+        org_not_allowed: 'Esta conta GitHub não pertence a uma organização autorizada. Use sua conta GitHub corporativa.',
+        email_mismatch: 'A conta GitHub precisa ter, verificado, o mesmo e-mail @greylogix.com.br usado no login Microsoft. No GitHub, acesse Settings > Emails, adicione e verifique esse e-mail e tente novamente.',
+        login_failed: 'Não foi possível concluir o login GitHub. Confira a configuração do OAuth App no servidor.'
+    };
+    if (connected) showToast('Conta GitHub conectada.');
+    else {
+        const message = messages[githubError] || messages.login_failed;
+        const gateError = document.querySelector('#github-gate-error');
+        gateError.textContent = message;
+        gateError.hidden = false;
+        showToast(message);
+    }
+    window.history.replaceState({}, '', window.location.pathname);
+}
 
 async function loadAuthStatus() {
     const message = document.querySelector('#auth-message');
     const error = document.querySelector('#auth-error');
     loginLink.href = `${apiBaseUrl}/auth/microsoft`;
+    for (const link of document.querySelectorAll('#github-gate a')) link.href = `${apiBaseUrl}/auth/github`;
     const authError = new URLSearchParams(window.location.search).get('authError');
     if (authError) {
         const messages = {
@@ -156,19 +335,26 @@ async function loadAuthStatus() {
             token_exchange: 'A Microsoft recusou a troca do código de login. Confira as credenciais do aplicativo e a URI de retorno cadastrada.',
             token_response: 'A resposta da Microsoft não continha uma identidade válida. Confira as permissões OpenID do aplicativo.',
             unauthorized_domain: 'O login foi concluído, mas esta conta não pertence a um domínio autorizado.',
+            user_disabled: 'Seu acesso ao Sentinela foi bloqueado por um administrador.',
+            session_required: 'Entre com sua conta Microsoft antes de conectar o GitHub.',
+            forbidden: 'Seu perfil de acesso não permite abrir o painel administrativo.',
             login_failed: 'Não foi possível validar a identidade Microsoft. Reinicie o login e, se persistir, confira o log do backend.'
         };
         error.textContent = messages[authError] || messages.login_failed;
         error.hidden = false;
+        if (authError === 'forbidden') showToast(messages.forbidden);
         window.history.replaceState({}, '', window.location.pathname);
     }
+    showGithubCallbackMessage();
     try {
         const status = await fetchJson('/api/auth/status', {}, 8000);
-        isAuthenticated = status.authenticated;
-        authGate.hidden = isAuthenticated;
-        applicationContent.hidden = !isAuthenticated;
-        if (isAuthenticated) {
+        authStatus = status;
+        const githubPending = status.authenticated && status.github?.required && !status.github.connected && status.user?.authType !== 'local';
+        isAuthenticated = status.authenticated && !status.user?.mustChangePassword && !githubPending;
+        showOnly(!status.authenticated ? 'auth' : status.user?.mustChangePassword ? 'password' : githubPending ? 'github' : 'app');
+        if (status.authenticated) {
             document.querySelector('#signed-in-user').textContent = status.user?.email || status.user?.name || 'Conta Microsoft';
+            applyPermissions(status);
         } else if (!status.authConfigured) {
             message.textContent = 'O acesso está bloqueado até que o login Microsoft seja configurado corretamente no servidor.';
             error.textContent = status.configurationError || 'Confira as variáveis de configuração Microsoft no servidor.';
@@ -180,8 +366,7 @@ async function loadAuthStatus() {
         setBusy(isBusy);
     } catch {
         isAuthenticated = false;
-        authGate.hidden = false;
-        applicationContent.hidden = true;
+        showOnly('auth');
         message.textContent = 'Não foi possível verificar a autenticação. O acesso permanece bloqueado.';
         error.textContent = 'Verifique se o backend está ativo e tente recarregar a página.';
         error.hidden = false;
@@ -230,6 +415,15 @@ function renderReport(report) {
     document.querySelector('#finding-total').textContent = String(report.findings.length);
     document.querySelector('#scan-meta').textContent = `${report.project} · ${new Date(report.scannedAt).toLocaleString('pt-BR')}`;
     const isPentest = report.kind === 'pentest';
+    const profile = report.projectProfile;
+    document.querySelector('#project-profile').hidden = !profile || isPentest;
+    if (profile) {
+        document.querySelector('#profile-description').textContent = profile.description || 'Descrição não disponível.';
+        document.querySelector('#profile-responsible').textContent = profile.responsible || 'Não identificado';
+        document.querySelector('#profile-responsible').title = profile.responsibleBasis || '';
+        document.querySelector('#profile-category').textContent = profile.category || '—';
+        document.querySelector('#profile-technologies').textContent = (profile.technologies || []).join(', ') || '—';
+    }
     document.querySelector('#findings-summary').textContent = isPentest
         ? `Teste ${report.modeLabel.toLowerCase()} · ${report.urlsTested} URL(s) com alertas`
         : `${report.filesAnalyzed} arquivos analisados`;
