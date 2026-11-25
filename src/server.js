@@ -4,20 +4,22 @@ loadEnvironmentFile(path.resolve(__dirname, '..', 'config', '.env'));
 const express = require('express');
 const helmet = require('helmet');
 const multer = require('multer');
-const AdmZip = require('adm-zip');
 const nodemailer = require('nodemailer');
 const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require('docx');
 const { rateLimit } = require('express-rate-limit');
 const { getTokenExchangeAuthError, isAllowedMicrosoftEmail } = require('./microsoft-auth');
 const scanners = require('./scanners');
+const { maxUploadBytes, readZip, sanitizeUploadName } = require('./upload');
 const store = require('./store');
 const github = require('./github');
 
 store.load();
 const generatedAdminPassword = store.ensureLocalAdmin();
 if (generatedAdminPassword) {
-    console.warn('[Sentinela/Admin] Conta admin local criada. Usuário: admin  Senha inicial: ' + generatedAdminPassword);
-    console.warn('[Sentinela/Admin] A troca da senha será exigida no primeiro login. Esta senha não será exibida novamente.');
+    // A senha inicial não vai para o log (coletores de log a guardariam); fica em arquivo restrito
+    // dentro de DATA_DIR, apagado automaticamente quando a senha é trocada.
+    const passwordFile = store.writeInitialPasswordFile(generatedAdminPassword);
+    console.warn('[Sentinela/Admin] Conta admin local criada (usuário "admin"). Senha inicial salva em %s; a troca será exigida no primeiro login.', passwordFile);
 }
 
 const app = express();
@@ -31,11 +33,6 @@ if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 
     throw new Error('TRUST_PROXY_HOPS deve ser um inteiro entre 0 e 10.');
 }
 app.set('trust proxy', trustProxyHops);
-const maxUploadBytes = 20 * 1024 * 1024;
-const maxExpandedBytes = 50 * 1024 * 1024;
-const maxFiles = 1000000;
-const maxSourceFiles = 500000;
-const maxFileBytes = 500 * 1024;
 const maxAiCharacters = 180000;
 const maxDependencyQueries = 2000;
 const storedReports = new Map();
@@ -47,13 +44,6 @@ const jobs = new Map();
 const maxAiBatches = Math.max(1, Math.min(20, Number(process.env.AI_MAX_BATCHES || 5)));
 const publicDirectory = path.resolve(__dirname, '..', 'public');
 const configuredApiOrigins = new Set((process.env.APP_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean));
-const textExtensions = new Set([
-    '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.php', '.java', '.go',
-    '.rb', '.cs', '.html', '.htm', '.vue', '.svelte', '.json', '.yaml', '.yml',
-    '.toml', '.xml', '.properties', '.env', '.conf', '.config', '.sql', '.sh',
-    '.tf', '.dockerfile', '.prisma', '.md'
-]);
-const ignoredPath = /(^|\/)(node_modules|vendor|\.git|dist|build|coverage|\.next|\.venv|venv|__pycache__)(\/|$)/i;
 
 app.disable('x-powered-by');
 app.use((request, response, next) => {
@@ -255,7 +245,7 @@ app.get('/auth/callback', async (request, response) => {
             } catch {
                 providerError = 'invalid_error_response';
             }
-            console.error(`[Sentinela/Auth] Microsoft token exchange failed: HTTP ${tokenResponse.status}, ${providerError}${providerCodes ? ` (${providerCodes})` : ''}.`);
+            console.error('[Sentinela/Auth] Microsoft token exchange failed: HTTP %d, %s %s', tokenResponse.status, providerError, providerCodes);
             if (providerCodes.includes('AADSTS700025')) {
                 console.error('[Sentinela/Auth] O redirect URI está registrado como cliente público. No Entra ID > Autenticação, mova-o para a plataforma "Web" e desative "Permitir fluxos de clientes públicos".');
             }
@@ -656,7 +646,7 @@ app.post('/api/scan/zip', requireGithubIfMandatory, requireAiConfiguration, uplo
     try {
         if (!request.file) return response.status(400).json({ error: 'Selecione um arquivo ZIP.' });
         const { files, warnings } = readZip(request.file.buffer);
-        const projectName = request.file.originalname;
+        const projectName = sanitizeUploadName(request.file.originalname);
         const session = request.authSession;
         const origin = { source: 'zip', repository: null, private: null };
         store.audit(session.email, 'analise_iniciada', { source: 'zip', project: projectName });
@@ -720,7 +710,7 @@ app.post('/api/pentest', requireGithubIfMandatory, async (request, response, nex
             return response.status(409).json({ error: 'Já existe um teste dinâmico em andamento. Aguarde a conclusão para iniciar outro.' });
         }
         const session = request.authSession;
-        console.log(`[Sentinela/Pentest] ${new Date().toISOString()} ${session.email} iniciou teste ${mode} em ${target.url}`);
+        console.log('[Sentinela/Pentest] %s %s iniciou teste %s em %s', new Date().toISOString(), logSafe(session.email), mode, logSafe(target.url));
         store.audit(session.email, 'pentest_iniciado', { target: target.url, mode });
         const job = startJob(session, 'pentest', async (setStage) => {
             const result = await scanners.runZap(target.url, mode, setStage);
@@ -807,11 +797,11 @@ adminRouter.get('/overview', (_request, response) => {
     const users = store.listUsers();
     const now = Date.now();
     const dayMs = 24 * 60 * 60 * 1000;
-    const countBy = (items, key) => items.reduce((total, item) => {
-        const value = typeof key === 'function' ? key(item) : item[key];
+    const countBy = (items, read) => items.reduce((total, item) => {
+        const value = String(read(item));
         total[value] = (total[value] || 0) + 1;
         return total;
-    }, {});
+    }, Object.create(null));
     const severityTotals = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
     for (const project of projects) {
         for (const level of Object.keys(severityTotals)) severityTotals[level] += project.counts?.[level] || 0;
@@ -826,8 +816,8 @@ adminRouter.get('/overview', (_request, response) => {
         projects: {
             total: projects.length,
             last30Days: projects.filter((project) => now - Date.parse(project.scannedAt) < 30 * dayMs).length,
-            byRecommendation: countBy(projects, 'recommendation'),
-            bySource: countBy(projects, 'source'),
+            byRecommendation: countBy(projects, (project) => project.recommendation),
+            bySource: countBy(projects, (project) => project.source),
             byStatus: countBy(projects, (project) => project.status || 'pendente'),
             privateRepositories: projects.filter((project) => project.private).length,
             severityTotals,
@@ -840,7 +830,7 @@ adminRouter.get('/overview', (_request, response) => {
         },
         users: {
             total: users.length,
-            byRole: countBy(users, 'role'),
+            byRole: countBy(users, (user) => user.role),
             disabled: users.filter((user) => user.disabled).length,
             activeSessions: activeSessions.length,
             githubConnected: activeSessions.filter((session) => session.github).length
@@ -892,13 +882,14 @@ adminRouter.get('/projects/:scanId', (request, response) => {
 adminRouter.patch('/projects/:scanId', (request, response) => {
     const project = store.getProject(request.params.scanId);
     if (!project) return response.status(404).json({ error: 'Projeto não encontrado.' });
+    const body = request.body || {};
     const changes = {};
-    for (const [field, limit] of [['responsible', 200], ['description', 800], ['notes', 2000]]) {
-        if (typeof request.body?.[field] === 'string') changes[field] = request.body[field].trim().slice(0, limit);
-    }
-    if (request.body?.status !== undefined) {
-        if (!projectStatuses.includes(request.body.status)) return response.status(400).json({ error: 'Status inválido.' });
-        changes.status = request.body.status;
+    if (typeof body.responsible === 'string') changes.responsible = body.responsible.trim().slice(0, 200);
+    if (typeof body.description === 'string') changes.description = body.description.trim().slice(0, 800);
+    if (typeof body.notes === 'string') changes.notes = body.notes.trim().slice(0, 2000);
+    if (body.status !== undefined) {
+        if (!projectStatuses.includes(body.status)) return response.status(400).json({ error: 'Status inválido.' });
+        changes.status = body.status;
     }
     if (!Object.keys(changes).length) return response.status(400).json({ error: 'Nenhuma alteração informada.' });
     if (changes.responsible !== undefined) changes.responsibleBasis = `Definido manualmente por ${request.authSession.email}.`;
@@ -920,15 +911,15 @@ adminRouter.delete('/projects/:scanId', (request, response) => {
 
 adminRouter.get('/users', (_request, response) => {
     const now = Date.now();
-    const sessionsByEmail = {};
+    const sessionsByEmail = new Map();
     for (const session of authSessions.values()) {
-        if (session.expiresAt > now) sessionsByEmail[session.email] = (sessionsByEmail[session.email] || 0) + 1;
+        if (session.expiresAt > now) sessionsByEmail.set(session.email, (sessionsByEmail.get(session.email) || 0) + 1);
     }
-    const scansByEmail = {};
-    for (const project of store.listProjects()) scansByEmail[project.scannedBy] = (scansByEmail[project.scannedBy] || 0) + 1;
+    const scansByEmail = new Map();
+    for (const project of store.listProjects()) scansByEmail.set(project.scannedBy, (scansByEmail.get(project.scannedBy) || 0) + 1);
     response.json({
         roles: store.ROLES.map((role) => ({ value: role, label: store.ROLE_LABELS[role] })),
-        users: store.listUsers().map((user) => ({ ...user, activeSessions: sessionsByEmail[user.email] || 0, scans: scansByEmail[user.email] || 0 }))
+        users: store.listUsers().map((user) => ({ ...user, activeSessions: sessionsByEmail.get(user.email) || 0, scans: scansByEmail.get(user.email) || 0 }))
     });
 });
 
@@ -1087,7 +1078,7 @@ app.use((error, _request, response, _next) => {
 });
 
 app.listen(port, host, () => {
-    console.log(`Sentinela disponível em http://${host}:${port}`);
+    console.log('Sentinela disponível em http://%s:%d', host, port);
     if (process.env.NODE_ENV !== 'test') {
         scanners.isDockerAvailable().then((available) => {
             if (available) console.log('[Sentinela] Docker disponível: Semgrep, Gitleaks e OWASP ZAP habilitados. Rode "npm run tools:pull" para baixar as imagens antecipadamente.');
@@ -1124,74 +1115,13 @@ function startJob(session, type, work, { label = '' } = {}) {
         })
         .catch((error) => {
             const status = Number(error.status) || 500;
-            if (status >= 500) console.error(`[Sentinela/${type}]`, error.message);
+            if (status >= 500) console.error('[Sentinela/%s] %s', type, logSafe(error.message));
             job.error = status < 500 || [502, 503, 504].includes(status) ? error.message : 'Falha interna ao processar a análise. Verifique o log do servidor.';
             job.status = 'error';
             store.audit(session.email, 'analise_falhou', { type, label: job.label, error: job.error.slice(0, 200) });
         })
         .finally(() => { job.finishedAt = Date.now(); });
     return job;
-}
-
-function readZip(buffer) {
-    let zip;
-    try {
-        zip = new AdmZip(buffer);
-    } catch {
-        throw httpError(400, 'O arquivo não é um ZIP válido.');
-    }
-    const entries = zip.getEntries();
-    if (!entries.length) throw httpError(400, 'O ZIP não contém arquivos.');
-    if (entries.length > maxFiles) throw httpError(413, `O ZIP contém mais de ${maxFiles} arquivos.`);
-
-    let expandedBytes = 0;
-    for (const entry of entries) {
-        if (entry.isDirectory) continue;
-        expandedBytes += entry.header.size;
-        if (expandedBytes > maxExpandedBytes) throw httpError(413, 'O conteúdo descompactado excede o limite de 50 MB.');
-    }
-
-    const files = [];
-    let skippedLargeFiles = 0;
-    let skippedEnvironmentFiles = 0;
-    for (const entry of entries) {
-        if (entry.isDirectory) continue;
-        const name = entry.entryName.replaceAll('\\', '/').replace(/^\/+/, '');
-        if (!name || name.split('/').some((part) => part === '..') || ignoredPath.test(name)) continue;
-        if (isEnvironmentFile(name)) {
-            skippedEnvironmentFiles += 1;
-            continue;
-        }
-        if (!isTextFile(name)) continue;
-        if (entry.header.size > maxFileBytes) {
-            skippedLargeFiles += 1;
-            continue;
-        }
-        let content;
-        try {
-            content = entry.getData().toString('utf8');
-        } catch {
-            throw httpError(400, `O ZIP está corrompido ou usa um formato não suportado (arquivo ${name.slice(0, 120)}).`);
-        }
-        if (content.includes('\u0000')) continue;
-        files.push({ path: name, content });
-        if (files.length > maxSourceFiles) throw httpError(413, `O projeto excede o limite de ${maxSourceFiles} arquivos analisáveis.`);
-    }
-    if (!files.length) throw httpError(400, 'Nenhum arquivo de código ou manifesto compatível foi encontrado no ZIP.');
-    const warnings = [
-        ...(skippedLargeFiles ? [`${skippedLargeFiles} arquivo(s) de texto acima de 500 KB foram ignorados.`] : []),
-        ...(skippedEnvironmentFiles ? [`${skippedEnvironmentFiles} arquivo(s) de ambiente .env foram excluídos para proteger credenciais.`] : [])
-    ];
-    return { files, warnings };
-}
-
-function isEnvironmentFile(filePath) {
-    return /^\.env(?:$|\.)/i.test(path.posix.basename(filePath));
-}
-
-function isTextFile(filePath) {
-    const basename = path.posix.basename(filePath).toLowerCase();
-    return textExtensions.has(path.posix.extname(basename)) || /^dockerfile(?:\..*)?$/.test(basename) || basename === 'makefile' || basename.startsWith('.env');
 }
 
 function parseGithubUrl(value) {
@@ -1891,7 +1821,7 @@ async function scanWithOpenAI(files, setStage = () => {}) {
             } catch (error) {
                 failedBatches += 1;
                 firstError ||= error;
-                console.error(`[Sentinela/OpenAI] lote ${index + 1}/${batches.length}:`, error.message);
+                console.error('[Sentinela/OpenAI] lote %d/%d: %s', index + 1, batches.length, logSafe(error.message));
             }
             completed += 1;
             setStage(`Análise por IA: ${completed} de ${batches.length} lote(s) concluído(s)...`);
@@ -2126,6 +2056,12 @@ function severityWeight(severity) {
     return ({ critical: 5, high: 4, medium: 3, low: 2, info: 1 })[severity] || 0;
 }
 
+// Remove quebras de linha e caracteres de controle de valores externos antes de registrá-los,
+// impedindo a falsificação de linhas de log (log injection).
+function logSafe(value) {
+    return String(value ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').slice(0, 500);
+}
+
 function httpError(status, message) {
     const error = new Error(message);
     error.status = status;
@@ -2165,6 +2101,6 @@ function loadEnvironmentFile(envPath) {
         }
     }
     if (shadowed.length) {
-        console.warn(`[Sentinela/Config] Variáveis do terminal ignoradas em favor de config/.env: ${shadowed.join(', ')}.`);
+        console.warn('[Sentinela/Config] Variáveis do terminal ignoradas em favor de config/.env: %s.', shadowed.join(', '));
     }
 }

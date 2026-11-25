@@ -14,6 +14,8 @@ const maxProjects = 2000;
 const dataDirectory = path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 'data'));
 const reportsDirectory = path.join(dataDirectory, 'reports');
 const databaseFile = path.join(dataDirectory, 'sentinela.json');
+const initialPasswordFile = path.join(dataDirectory, 'senha-inicial-admin.txt');
+const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
 
 let state = null;
 
@@ -30,7 +32,7 @@ function load() {
         } catch (error) {
             const backup = `${databaseFile}.corrompido-${Date.now()}`;
             fs.copyFileSync(databaseFile, backup);
-            console.error(`[Sentinela/Store] Arquivo de dados inválido; cópia salva em ${backup}.`, error.message);
+            console.error('[Sentinela/Store] Arquivo de dados inválido; cópia salva em %s. %s', backup, error.message);
             state = emptyState();
         }
     } else {
@@ -119,6 +121,15 @@ function setLocalAdminPassword(password, { mustChange = false } = {}) {
         lastLoginAt: state.localAdmin?.lastLoginAt || null
     };
     flush();
+    fs.rmSync(initialPasswordFile, { force: true });
+}
+
+// Grava a senha inicial gerada em arquivo legível apenas pelo usuário do processo,
+// em vez de exibi-la no log. O arquivo é removido quando a senha é alterada.
+function writeInitialPasswordFile(password) {
+    fs.mkdirSync(dataDirectory, { recursive: true });
+    fs.writeFileSync(initialPasswordFile, `Usuário: ${LOCAL_ADMIN_USERNAME}\nSenha inicial: ${password}\nTroque a senha no primeiro login; este arquivo será apagado automaticamente.\n`, { mode: 0o600 });
+    return initialPasswordFile;
 }
 
 // Garante que exista a conta local. Na primeira execução, gera uma senha e a exibe uma vez no log.
@@ -159,12 +170,23 @@ function normalizeEmail(email) {
     return String(email || '').trim().toLowerCase();
 }
 
+function userKey(email) {
+    const key = normalizeEmail(email);
+    if (!key || forbiddenKeys.has(key)) return null;
+    return key;
+}
+
+function ownUser(key) {
+    const users = load().users;
+    return key && Object.hasOwn(users, key) ? users[key] : null;
+}
+
 function getBootstrapAdmins() {
     return (process.env.ADMIN_EMAILS || '').split(',').map(normalizeEmail).filter(Boolean);
 }
 
 function getUser(email) {
-    return load().users[normalizeEmail(email)] || null;
+    return ownUser(userKey(email));
 }
 
 function listUsers() {
@@ -173,10 +195,11 @@ function listUsers() {
 
 // Registra o login Microsoft e devolve o usuário (com perfil). Novos usuários entram como "basic".
 function recordMicrosoftLogin(email, name) {
-    const key = normalizeEmail(email);
+    const key = userKey(email);
+    if (!key) throw Object.assign(new Error('E-mail inválido.'), { status: 400 });
     const users = load().users;
     const now = new Date().toISOString();
-    if (!users[key]) {
+    if (!ownUser(key)) {
         users[key] = {
             email: key,
             name: name || '',
@@ -198,12 +221,12 @@ function recordMicrosoftLogin(email, name) {
 }
 
 function upsertUser(email, { role, name, disabled, notes }, actor) {
-    const key = normalizeEmail(email);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(key)) throw Object.assign(new Error('Informe um e-mail válido.'), { status: 400 });
+    const key = userKey(email);
+    if (!key || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(key)) throw Object.assign(new Error('Informe um e-mail válido.'), { status: 400 });
     if (role !== undefined && !ROLES.includes(role)) throw Object.assign(new Error('Perfil inválido.'), { status: 400 });
     const users = load().users;
     const now = new Date().toISOString();
-    users[key] ||= { email: key, name: '', role: 'basic', disabled: false, createdAt: now, createdBy: actor, lastLoginAt: null, loginCount: 0 };
+    if (!ownUser(key)) users[key] = { email: key, name: '', role: 'basic', disabled: false, createdAt: now, createdBy: actor, lastLoginAt: null, loginCount: 0 };
     const user = users[key];
     if (role !== undefined) user.role = role;
     if (name !== undefined) user.name = String(name).slice(0, 120);
@@ -216,9 +239,9 @@ function upsertUser(email, { role, name, disabled, notes }, actor) {
 }
 
 function deleteUser(email) {
-    const key = normalizeEmail(email);
-    const existed = Boolean(load().users[key]);
-    delete state.users[key];
+    const key = userKey(email);
+    const existed = Boolean(ownUser(key));
+    if (existed) delete state.users[key];
     save();
     return existed;
 }
@@ -308,6 +331,7 @@ module.exports = {
     getLocalAdmin,
     setLocalAdminPassword,
     ensureLocalAdmin,
+    writeInitialPasswordFile,
     verifyLocalAdminLogin,
     normalizeEmail,
     getUser,

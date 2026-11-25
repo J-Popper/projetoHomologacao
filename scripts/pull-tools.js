@@ -7,11 +7,11 @@ const { getToolImages } = require('../src/scanners');
 
 let failed = false;
 for (const [tool, image] of Object.entries(getToolImages())) {
-    console.log(`\n[${tool}] docker pull ${image}`);
+    console.log('\n[%s] docker pull %s', tool, image);
     const result = spawnSync('docker', ['pull', image], { stdio: 'inherit' });
     if (result.status !== 0) {
         failed = true;
-        console.error(`[${tool}] falha ao baixar ${image}. O Docker está em execução?`);
+        console.error('[%s] falha ao baixar %s. O Docker está em execução?', tool, image);
     }
 }
 process.exit(failed ? 1 : 0);

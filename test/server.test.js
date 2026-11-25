@@ -13,7 +13,12 @@ let baseUrl;
 let serverPort;
 let serverOutput = '';
 const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sentinela-test-'));
-const initialAdminPassword = 'Inicial-Teste-1234!';
+// Módulos carregados no próprio processo de teste também usam o diretório temporário.
+process.env.DATA_DIR = dataDirectory;
+// Credenciais de teste geradas a cada execução: nenhum segredo fica fixo no código.
+const randomSecret = (prefix) => `${prefix}-${require('node:crypto').randomBytes(12).toString('base64url')}-Aa1!`;
+const initialAdminPassword = randomSecret('Inicial');
+const changedAdminPassword = randomSecret('Nova');
 
 before(async () => {
     serverPort = await getAvailablePort();
@@ -28,7 +33,7 @@ before(async () => {
             TRUST_PROXY_HOPS: '0',
             OPENAI_API_KEY: '',
             MICROSOFT_CLIENT_ID: '11111111-1111-4111-8111-111111111111',
-            MICROSOFT_CLIENT_SECRET: 'test-secret',
+            MICROSOFT_CLIENT_SECRET: randomSecret('client'),
             MICROSOFT_TENANT_ID: '22222222-2222-4222-8222-222222222222',
             MICROSOFT_REDIRECT_URI: 'http://localhost:3000/auth/callback',
             MICROSOFT_ALLOWED_EMAIL_DOMAINS: '',
@@ -273,7 +278,7 @@ test('local admin must change the initial password, then gets the admin panel', 
     const weak = await api('/api/account/password', { cookie, method: 'POST', body: { currentPassword: initialAdminPassword, newPassword: 'curta' } });
     assert.equal(weak.status, 400);
 
-    const changed = await api('/api/account/password', { cookie, method: 'POST', body: { currentPassword: initialAdminPassword, newPassword: 'Nova-Senha-Forte-2026' } });
+    const changed = await api('/api/account/password', { cookie, method: 'POST', body: { currentPassword: initialAdminPassword, newPassword: changedAdminPassword } });
     assert.equal(changed.status, 200);
 
     const status = await api('/api/auth/status', { cookie });
@@ -325,14 +330,15 @@ test('GitHub login is reported as not configured when variables are empty', asyn
 
 test('password storage uses salted scrypt hashes and enforces strength', () => {
     const store = require('../src/store');
-    const hash = store.hashPassword('Senha-Exemplo-123');
+    const sample = randomSecret('Exemplo');
+    const hash = store.hashPassword(sample);
     assert.match(hash, /^scrypt\$/);
-    assert.notEqual(hash, store.hashPassword('Senha-Exemplo-123'));
-    assert.equal(store.verifyPassword('Senha-Exemplo-123', hash), true);
-    assert.equal(store.verifyPassword('senha-exemplo-123', hash), false);
+    assert.notEqual(hash, store.hashPassword(sample));
+    assert.equal(store.verifyPassword(sample, hash), true);
+    assert.equal(store.verifyPassword(sample.toLowerCase(), hash), false);
     assert.ok(store.validateNewPassword('curta'));
     assert.ok(store.validateNewPassword('somenteminusculas'));
-    assert.equal(store.validateNewPassword('Aceitavel-Senha-1'), null);
+    assert.equal(store.validateNewPassword(randomSecret('Aceitavel')), null);
     assert.equal(store.validateNewPassword(store.generatePassword()), null);
 });
 
@@ -389,3 +395,84 @@ test('wildcard pentest allowlist does not open internal network or cloud metadat
     assert.equal((await checkPentestTargetAddress('https://naoexiste.exemplo.com/', ['*'], lookup)).status, 400);
 });
 
+
+// ---- Upload de ZIP ----
+
+test('ZIP upload is validated by content signature, not only by extension', () => {
+    const AdmZip = require('adm-zip');
+    const { isZipBuffer, readZip } = require('../src/upload');
+    const zip = new AdmZip();
+    zip.addFile('app/index.js', Buffer.from('console.log(1);'));
+    const valid = zip.toBuffer();
+
+    assert.equal(isZipBuffer(valid), true);
+    assert.equal(isZipBuffer(Buffer.from('MZ\x90\x00executavel')), false);
+    assert.equal(isZipBuffer(Buffer.from('<?php system($_GET[1]);')), false);
+    assert.throws(() => readZip(Buffer.from('não sou um zip')), (error) => error.status === 400);
+    assert.equal(readZip(valid).files[0].path, 'app/index.js');
+});
+
+test('ZIP reader skips traversal, absolute and environment paths and rejects corrupted data', () => {
+    const AdmZip = require('adm-zip');
+    const { readZip } = require('../src/upload');
+    const zip = new AdmZip();
+    zip.addFile('ok.js', Buffer.from('let a = 1;'));
+    zip.addFile('config/.env', Buffer.from('SECRET=1'));
+    zip.addFile('node_modules/x/index.js', Buffer.from('x'));
+    zip.addFile('img.png', Buffer.from('binario'));
+    const buffer = zip.toBuffer();
+    // Renomeia entradas diretamente no buffer para nomes maliciosos de mesmo tamanho.
+    const malicious = Buffer.from(buffer.toString('latin1').replaceAll('img.png', '../x.js').replaceAll('ok.js', 'C:/a.'), 'latin1');
+    const result = readZip(buffer);
+    assert.deepEqual(result.files.map((file) => file.path), ['ok.js']);
+    assert.match(result.warnings.join(' '), /\.env/);
+    const maliciousResult = (() => { try { return readZip(malicious); } catch (error) { return error; } })();
+    if (maliciousResult instanceof Error) assert.equal(maliciousResult.status, 400);
+    else assert.equal(maliciousResult.files.some((file) => file.path.includes('..') || /^[a-z]:/i.test(file.path)), false);
+
+    // Dados comprimidos adulterados: erro 400, nunca falha interna.
+    const big = new AdmZip();
+    big.addFile('a.js', Buffer.from('const x = 1;\n'.repeat(500)));
+    const corrupted = big.toBuffer();
+    const dataStart = 30 + 'a.js'.length;
+    for (let index = dataStart; index < dataStart + 20; index += 1) corrupted[index] ^= 0xff;
+    assert.throws(() => readZip(corrupted), (error) => error.status === 400);
+});
+
+test('uploaded file names are reduced to a safe label', () => {
+    const { sanitizeUploadName } = require('../src/upload');
+    assert.equal(sanitizeUploadName('../../etc/passwd.zip'), 'passwd.zip');
+    assert.equal(sanitizeUploadName('C:\\Users\\x\\projeto.zip'), 'projeto.zip');
+    assert.equal(sanitizeUploadName('proj\r\nX-Injected: 1.zip'), 'projX-Injected: 1.zip');
+    assert.equal(sanitizeUploadName('fatura\u202Egpj.zip'), 'faturagpj.zip');
+    assert.equal(sanitizeUploadName(''), 'projeto.zip');
+    assert.equal(sanitizeUploadName('a'.repeat(400)).length, 150);
+});
+
+// ---- Injeção de propriedades ----
+
+test('user store ignores prototype property names as user keys', () => {
+    const store = require('../src/store');
+    assert.equal(store.getUser('__proto__'), null);
+    assert.equal(store.getUser('constructor'), null);
+    assert.equal(store.getUser('toString'), null);
+    assert.throws(() => store.upsertUser('__proto__', { role: 'admin' }, 'teste'), (error) => error.status === 400);
+    assert.equal({}.role, undefined);
+});
+
+test('admin API rejects prototype-polluting payloads and unknown fields', async () => {
+    const login = await api('/api/auth/local', { method: 'POST', body: { username: 'admin', password: changedAdminPassword } });
+    const cookie = sessionCookie(login.headers);
+    assert.ok(cookie);
+    const response = await fetch(`${baseUrl}/api/admin/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: '{"email":"__proto__","role":"admin","__proto__":{"role":"admin","isAdmin":true}}'
+    });
+    assert.equal(response.status, 400);
+    const missing = await api('/api/admin/users/__proto__', { cookie, method: 'PATCH', body: { role: 'admin' } });
+    assert.equal(missing.status, 404);
+    const overview = await api('/api/admin/overview', { cookie });
+    assert.equal(overview.status, 200);
+    assert.equal({}.isAdmin, undefined);
+});
