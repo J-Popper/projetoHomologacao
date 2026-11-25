@@ -130,6 +130,8 @@ Cada teste dinâmico é registrado no log do servidor com o usuário, o alvo, o 
 
 Para uma aplicação rodando na própria máquina do Sentinela, use `localhost` na URL e inclua `localhost` em `PENTEST_ALLOWED_HOSTS`; o Sentinela redireciona o ZAP para `host.docker.internal`.
 
+Proteção contra SSRF: antes do teste, o host é resolvido e os endereços são verificados. Metadados de nuvem e link-local (`169.254.0.0/16`, `metadata.google.internal` etc.) são sempre bloqueados. Loopback e redes privadas (`127/8`, `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `::1`, `fc00::/7`) só são aceitos quando o host está listado **explicitamente**; o curinga `*` sozinho não os libera. Exemplo para testar qualquer host público e também a máquina local: `PENTEST_ALLOWED_HOSTS=*,localhost`. Bloqueios ficam na auditoria. Risco residual: o ZAP resolve o DNS de novo, então um domínio malicioso com DNS rebinding ainda poderia apontar para a rede interna; em produção, prefira uma lista explícita de hosts em vez de `*`.
+
 Sem SMTP, o relatório continua disponível para download em DOCX, mas não pode ser enviado por e-mail. O download JSON não é oferecido pela interface.
 
 ## Escopo e limitações

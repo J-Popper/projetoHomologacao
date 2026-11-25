@@ -11,7 +11,7 @@ const actionLabels = {
     github_desconectado: 'GitHub desconectado', github_org_recusada: 'GitHub fora da organização',
     github_email_recusado: 'GitHub com e-mail diferente do Microsoft',
     analise_iniciada: 'Análise iniciada', analise_concluida: 'Análise concluída', analise_falhou: 'Análise com falha',
-    pentest_iniciado: 'Teste dinâmico iniciado', acesso_negado: 'Acesso negado pelo perfil',
+    pentest_iniciado: 'Teste dinâmico iniciado', pentest_alvo_bloqueado: 'Alvo de teste bloqueado (SSRF)', acesso_negado: 'Acesso negado pelo perfil',
     senha_admin_alterada: 'Senha admin alterada', troca_senha_falhou: 'Falha ao trocar senha',
     admin_editou_projeto: 'Admin editou projeto', admin_excluiu_projeto: 'Admin excluiu projeto',
     admin_cadastrou_usuario: 'Admin concedeu acesso', admin_alterou_usuario: 'Admin alterou usuário',

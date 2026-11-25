@@ -350,3 +350,42 @@ test('GitHub account must have the same verified e-mail as the Microsoft login',
     assert.equal(findMatchingEmail(['ti@greylogix.com.br'], '', domains), 'ti@greylogix.com.br');
     assert.equal(findMatchingEmail(['ti@sub.greylogix.com.br', 'x@gmail.com'], '', domains), null);
 });
+
+// ---- SSRF no alvo do teste dinâmico ----
+
+test('pentest address classification blocks metadata/link-local and flags internal ranges', () => {
+    const { classifyAddress } = require('../src/scanners');
+    for (const ip of ['169.254.169.254', '0.0.0.0', '100.100.100.200', 'fe80::1', '::', '::ffff:169.254.169.254', '224.0.0.1']) {
+        assert.equal(classifyAddress(ip), 'blocked', ip);
+    }
+    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.0.10', '100.64.0.1', '::1', 'fd12::1', '::ffff:10.0.0.1']) {
+        assert.equal(classifyAddress(ip), 'internal', ip);
+    }
+    for (const ip of ['8.8.8.8', '172.32.0.1', '172.15.255.255', '2606:4700::1111']) {
+        assert.equal(classifyAddress(ip), 'public', ip);
+    }
+});
+
+test('wildcard pentest allowlist does not open internal network or cloud metadata', async () => {
+    const { checkPentestTargetAddress } = require('../src/scanners');
+    const fakeDns = (map) => async (host) => {
+        if (!map[host]) throw new Error('ENOTFOUND');
+        return map[host].map((address) => ({ address }));
+    };
+    const lookup = fakeDns({ 'app.exemplo.com': ['203.0.113.10'], 'rebind.exemplo.com': ['10.0.0.5'], localhost: ['127.0.0.1'], 'app.homolog.local': ['192.168.1.20'] });
+
+    assert.equal((await checkPentestTargetAddress('https://app.exemplo.com/', ['*'], lookup)).ok, true);
+    assert.equal((await checkPentestTargetAddress('http://169.254.169.254/latest/meta-data/', ['*'], lookup)).status, 403);
+    assert.equal((await checkPentestTargetAddress('http://metadata.google.internal/', ['*'], lookup)).status, 403);
+    assert.equal((await checkPentestTargetAddress('https://rebind.exemplo.com/', ['*'], lookup)).status, 403);
+    assert.equal((await checkPentestTargetAddress('http://localhost:3000/', ['*'], lookup)).status, 403);
+    assert.equal((await checkPentestTargetAddress('http://10.0.0.8/', ['*'], lookup)).status, 403);
+
+    // Hosts internos listados explicitamente continuam testáveis.
+    assert.equal((await checkPentestTargetAddress('http://localhost:3000/', ['*', 'localhost'], lookup)).ok, true);
+    assert.equal((await checkPentestTargetAddress('http://app.homolog.local/', ['*.homolog.local'], lookup)).ok, true);
+    // Metadados nunca, mesmo listados.
+    assert.equal((await checkPentestTargetAddress('http://169.254.169.254/', ['169.254.169.254'], lookup)).status, 403);
+    assert.equal((await checkPentestTargetAddress('https://naoexiste.exemplo.com/', ['*'], lookup)).status, 400);
+});
+

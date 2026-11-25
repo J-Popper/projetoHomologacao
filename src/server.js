@@ -711,6 +711,11 @@ app.post('/api/pentest', requireGithubIfMandatory, async (request, response, nex
         }
         const target = scanners.validatePentestTarget(request.body?.url);
         if (target.error) return response.status(target.status || 400).json({ error: target.error });
+        const addressCheck = await scanners.checkPentestTargetAddress(target.url);
+        if (addressCheck.error) {
+            store.audit(request.authSession.email, 'pentest_alvo_bloqueado', { target: target.url, reason: addressCheck.error.slice(0, 160) });
+            return response.status(addressCheck.status || 403).json({ error: addressCheck.error });
+        }
         if ([...jobs.values()].some((job) => job.type === 'pentest' && job.status === 'running')) {
             return response.status(409).json({ error: 'Já existe um teste dinâmico em andamento. Aguarde a conclusão para iniciar outro.' });
         }
@@ -1162,7 +1167,12 @@ function readZip(buffer) {
             skippedLargeFiles += 1;
             continue;
         }
-        const content = entry.getData().toString('utf8');
+        let content;
+        try {
+            content = entry.getData().toString('utf8');
+        } catch {
+            throw httpError(400, `O ZIP está corrompido ou usa um formato não suportado (arquivo ${name.slice(0, 120)}).`);
+        }
         if (content.includes('\u0000')) continue;
         files.push({ path: name, content });
         if (files.length > maxSourceFiles) throw httpError(413, `O projeto excede o limite de ${maxSourceFiles} arquivos analisáveis.`);
@@ -2126,6 +2136,9 @@ function isAllowedApiOrigin(origin) {
     try {
         const url = new URL(origin);
         if (configuredApiOrigins.has(url.origin)) return true;
+        // Origens locais (Live Server) só em desenvolvimento: em produção, qualquer página servida
+        // em localhost na máquina do usuário não deve poder chamar a API com credenciais.
+        if (process.env.NODE_ENV === 'production') return false;
         return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
     } catch {
         return false;

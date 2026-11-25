@@ -3,7 +3,9 @@
 // Cada ferramenta degrada com aviso no relatório quando o Docker não está disponível.
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
+const dns = require('node:dns').promises;
 const fs = require('node:fs/promises');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -237,6 +239,64 @@ function validatePentestTarget(value) {
     return { url: url.toString() };
 }
 
+// ---- Proteção contra SSRF no alvo do teste dinâmico ----
+// Endereços de metadados de nuvem e link-local são sempre bloqueados. Loopback e redes privadas
+// só são aceitos quando o host está listado explicitamente em PENTEST_ALLOWED_HOSTS
+// (o curinga "*" sozinho não libera a rede interna nem o próprio servidor).
+const metadataHostnames = new Set(['metadata', 'metadata.google.internal', 'instance-data', 'instance-data.ec2.internal']);
+
+function ipv4ToNumber(address) {
+    return address.split('.').reduce((total, part) => total * 256 + Number(part), 0);
+}
+
+function inIpv4Range(address, base, bits) {
+    const blockSize = 2 ** (32 - bits);
+    return Math.floor(ipv4ToNumber(address) / blockSize) === Math.floor(ipv4ToNumber(base) / blockSize);
+}
+
+// Classifica um IP: 'blocked' (nunca permitido), 'internal' (loopback/privado) ou 'public'.
+function classifyAddress(address) {
+    let ip = String(address).toLowerCase().replace(/^\[|\]$/g, '');
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
+    if (mapped) ip = mapped[1];
+    if (net.isIPv4(ip)) {
+        if ([['0.0.0.0', 8], ['169.254.0.0', 16], ['224.0.0.0', 4], ['240.0.0.0', 4]].some(([base, bits]) => inIpv4Range(ip, base, bits))
+            || ip === '100.100.100.200') return 'blocked';
+        if ([['127.0.0.0', 8], ['10.0.0.0', 8], ['172.16.0.0', 12], ['192.168.0.0', 16], ['100.64.0.0', 10]].some(([base, bits]) => inIpv4Range(ip, base, bits))) return 'internal';
+        return 'public';
+    }
+    if (net.isIPv6(ip)) {
+        if (ip === '::' || /^fe[89ab]/.test(ip) || ip.startsWith('ff') || ip === 'fd00:ec2::254') return 'blocked';
+        if (ip === '::1' || /^f[cd]/.test(ip)) return 'internal';
+        return 'public';
+    }
+    return 'blocked';
+}
+
+function isExplicitlyAllowed(hostname, allowedHosts) {
+    return isHostAllowed(hostname, allowedHosts.filter((entry) => entry !== '*'));
+}
+
+async function checkPentestTargetAddress(targetUrl, allowedHosts = getPentestAllowedHosts(), lookup = dns.lookup) {
+    const hostname = new URL(targetUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (metadataHostnames.has(hostname)) return { error: 'Endereços de metadados de nuvem não podem ser alvo do teste dinâmico.', status: 403 };
+    let addresses;
+    if (net.isIP(hostname)) addresses = [hostname];
+    else {
+        try {
+            addresses = (await lookup(hostname, { all: true })).map((item) => item.address);
+        } catch {
+            return { error: `Não foi possível resolver o host ${hostname}.`, status: 400 };
+        }
+    }
+    const classes = addresses.map(classifyAddress);
+    if (classes.includes('blocked')) return { error: 'O alvo aponta para um endereço reservado (link-local/metadados de nuvem) e foi bloqueado.', status: 403 };
+    if (classes.includes('internal') && !isExplicitlyAllowed(hostname, allowedHosts)) {
+        return { error: `O host ${hostname} aponta para a rede interna ou para o próprio servidor. Para testá-lo, inclua-o explicitamente em PENTEST_ALLOWED_HOSTS (o curinga "*" não libera endereços internos).`, status: 403 };
+    }
+    return { ok: true, addresses };
+}
+
 async function runZap(targetUrl, mode, onStage = () => {}) {
     if (!await isDockerAvailable()) throw Object.assign(new Error('Docker indisponível no servidor: o teste dinâmico não pode ser executado.'), { status: 503 });
     // Dentro do container, localhost aponta para o próprio container; usa o gateway do host.
@@ -322,6 +382,8 @@ function stripHtml(value) {
 }
 
 module.exports = {
+    checkPentestTargetAddress,
+    classifyAddress,
     getCachedDockerStatus,
     getPentestAllowedHosts,
     getToolImages,
